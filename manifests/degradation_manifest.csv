@@ -1,0 +1,2 @@
+# Maps each generated degraded clip variant back to its parent partition and the exact degradation recipe applied — prevents test-time recipes leaking into training.
+clip_id,parent_clip_id,parent_split,degradation_type,degradation_params

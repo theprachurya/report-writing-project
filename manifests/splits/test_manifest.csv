@@ -1,0 +1,2 @@
+# Held-out in-domain test split — untouched until final evaluation.
+clip_id,dataset,source_identity,source_video,manipulation_family,video_manipulated,audio_manipulated,clip_fake,audio_condition,file_path,duration_s,file_hash,split

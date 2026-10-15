@@ -1,0 +1,73 @@
+# Data pipeline configuration — docs/PROJECT_BRIEF.md Section 6.
+# All paths are user-provided; never hardcode or redistribute dataset files.
+
+# ── Dataset paths (override via CLI or env) ─────────────────────────────────
+datasets:
+  fakeavceleb:
+    root: "${FAKEAVCELEB_ROOT}"        # User sets this env var or overrides in CLI
+    role: "main_multimodal"            # Primary multimodal benchmark
+  dfdc:
+    root: "${DFDC_ROOT}"               # Optional; visual pretraining / robustness
+    role: "visual_transfer"            # Do NOT claim audio-deepfake unless audited
+
+# ── Video decode ─────────────────────────────────────────────────────────────
+decode:
+  target_fps: 25                       # Fixed decode frame rate
+  window_duration_s: 2.0               # 2-second windows
+  frames_per_window: 16                # 16 uniformly spaced face frames
+  effective_visual_fps: 8              # 16 frames / 2 s
+
+# ── Face extraction (Section 6, visual) ──────────────────────────────────────
+face:
+  detector: "opencv_haar"               # Offline OpenCV Haar baseline; alternate backends remain proposed
+  box_expansion: 0.20                  # Expand detected box by 20%
+  crop_size: 160                       # Output crop: 160×160 RGB
+  min_valid_frames: 12                 # Window valid only if ≥12/16 faces detected
+  align_by_landmarks: true             # Landmark-based alignment before crop
+
+visual_normalization:
+  mean: [0.485, 0.456, 0.406]           # ImageNet RGB mean for the configured CNN backbone
+  std: [0.229, 0.224, 0.225]
+
+quality_features:
+  visual_dim: 7
+  audio_dim: 5
+
+# ── Audio extraction (Section 6, audio) ──────────────────────────────────────
+audio:
+  sample_rate: 16000                   # 16 kHz mono
+  channels: 1
+  peak_normalize: true                 # Normalize AFTER recording clipping stats
+  vad_threshold: 0.30                  # Voice-activity fraction threshold; [Proposed]
+
+# ── Log-Mel spectrogram ──────────────────────────────────────────────────────
+mel:
+  n_mels: 80                          # 80-bin log-Mel
+  window_length_ms: 25                 # 25 ms STFT window
+  hop_length_ms: 10                    # 10 ms hop
+  f_min: 20.0                         # Hz
+  f_max: 8000.0                        # Hz (Nyquist for 16 kHz)
+
+# ── Temporal alignment ───────────────────────────────────────────────────────
+alignment:
+  temporal_bins: 8                     # T=8 bins per 2 s window
+  embedding_dim: 256                   # Pool to one 256-D vector per bin
+
+# ── Validity / missingness ───────────────────────────────────────────────────
+validity:
+  min_face_detection_rate: 0.75        # 12/16 frames
+  min_vad_fraction: 0.10               # Minimum voice-activity fraction
+  retain_invalid_with_flags: true      # Keep invalid windows with missingness flags
+
+# ── Split ratios (Section 5.3) ───────────────────────────────────────────────
+split:
+  train: 0.70
+  val: 0.10
+  test: 0.20
+  seed: 42                            # Split seed; manifests are versioned, not just seeded
+
+# ── Caching ──────────────────────────────────────────────────────────────────
+cache:
+  cache_dir: "data/cache"              # Precomputed crops and spectrograms
+  enable_crop_cache: true
+  enable_mel_cache: true

@@ -1,0 +1,26 @@
+# Never track licensed/raw datasets, derived caches, or trained weights.
+data/raw/
+data/processed/
+data/cache/
+artifacts/*
+!artifacts/README.md
+reports/generated/
+# Keep generated reports local; only final poster figures are versioned.
+reports/*
+!reports/README.md
+!reports/figures/
+!reports/figures/**
+*.ckpt
+*.pt
+*.onnx
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.mlruns/
+.env*
+!.env.example
+.venv/
+venv/

@@ -1,0 +1,70 @@
+# Model architecture configuration — docs/PROJECT_BRIEF.md Section 7.
+# [Proposed] decisions are implemented as configurable/toggleable flags.
+
+# ── Visual encoder (Section 7.1) ─────────────────────────────────────────────
+visual_encoder:
+  backbone: "mobilenetv3_small"         # "mobilenetv3_small" | "efficientnet_b0"
+  pretrained: true                      # ImageNet pretrained weights
+  input_size: 160                       # 160×160 RGB crops
+  temporal_bins: 8                      # T=8 bins
+  embedding_dim: 256                    # z_v ∈ R^{8×256}
+  temporal_conv:
+    kernel_size: 3                      # Depthwise temporal Conv1D
+    groups: 256                         # Depthwise: groups == channels
+
+# ── Audio encoder (Section 7.1) ───────────────────────────────────────────────
+audio_encoder:
+  type: "ds_cnn"                        # 2-D depthwise-separable CNN
+  width_multiplier: 1.0                 # 0.75–1.0; [Proposed] start at 1.0
+  temporal_bins: 8                      # T=8 bins
+  embedding_dim: 256                    # z_a ∈ R^{8×256}
+
+# ── Alignment projector (Section 7.1) ────────────────────────────────────────
+alignment_projector:
+  projection_dim: 128                   # Shared 128-D comparison space
+  input_dim: 256                        # Must match encoder embedding_dim
+
+# ── Synchronization features (Section 7.1, 7.3) ─────────────────────────────
+sync_features:
+  offsets: [-2, -1, 0, 1, 2]           # δ ∈ {-2, -1, 0, 1, 2}
+  # Output: s_0, max_δ s_δ, best offset, dispersion → 4 features
+  output_dim: 4
+
+# ── Quality features (Section 7.1) ───────────────────────────────────────────
+quality_features:
+  # Visual: detection_success, blur_var_laplacian, face_area, luminance_mean,
+  #         luminance_std, saturation_mean, failed_frame_fraction → 7 features
+  visual_dim: 7
+  # Audio: vad_fraction, rms, clipped_ratio, snr_proxy, duration_mismatch → 5 features
+  audio_dim: 5
+
+# ── Modality heads (Section 7.1) ─────────────────────────────────────────────
+modality_heads:
+  input_dim: 256                        # Mean-pooled z_v or z_a
+  hidden_dim: 128
+  dropout: 0.1
+  # Outputs: p_v, p_a (unimodal logits) + uncertainty estimates
+
+# ── Reliability estimator (Section 7.2) ──────────────────────────────────────
+reliability_estimator:
+  # Input: [h_v, h_a, c] ≈ 30–50 features
+  # h_m = pooled feature stats + quality features + missingness + uncertainty
+  hidden_dim: 128
+  dropout: 0.1
+  gate_temperature: 1.0                # T_g for softmax(g / T_g); [Proposed]
+  # Output: w_v, w_a via softmax; w_v + w_a = 1
+
+# ── Fusion classifier (Section 7.1) ──────────────────────────────────────────
+fusion_classifier:
+  # Input: [w_v * z_v_bar, w_a * z_a_bar, c, w_v, w_a]
+  hidden_dim: 256
+  dropout: 0.2
+  # Output: fused logit p_f
+
+# ── Ablation flags ────────────────────────────────────────────────────────────
+# [Proposed] decisions — toggleable for ablation studies (Section 9.1 baselines 6-8)
+ablation:
+  use_sync_features: true               # Baseline 7 = false
+  use_quality_features: true            # Baseline 6 = false
+  use_reliability_gate: true            # false → equal weights (baseline 3-5)
+  fusion_mode: "reliability"            # "equal_weight" | "concat" | "learned_global" | "reliability"

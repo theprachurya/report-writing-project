@@ -1,0 +1,95 @@
+# Training configuration — docs/PROJECT_BRIEF.md Section 8.
+# Starting values are [Proposed]; tune on validation only.
+
+# ── Stage selector ────────────────────────────────────────────────────────────
+# Stages: "unimodal" | "fixed_fusion" | "reliability_fusion" | "distillation"
+stage: "unimodal"
+
+# ── Loss weights (Section 8) ─────────────────────────────────────────────────
+# L = L_f + α(BCE_v + BCE_a) + β·L_rel + γ·L_con + η·L_bal
+loss:
+  alpha: 0.25                           # Unimodal head weight
+  beta: 0.10                            # Reliability loss weight
+  gamma: 0.05                           # Optional contrastive (InfoNCE) weight
+  eta: 0.0                              # Balance regularization; brief warm-up only
+  tau_r: 1.0                            # Temperature for detached soft target t_m
+
+# ── Optimizer ─────────────────────────────────────────────────────────────────
+optimizer:
+  type: "adamw"                         # "adam" | "adamw" | "sgd"
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+scheduler:
+  type: "cosine_annealing_warm_restarts"  # "cosine" | "step" | "cosine_annealing_warm_restarts"
+  T_0: 10
+  T_mult: 1
+  eta_min: 1.0e-6
+  warmup_epochs: 3
+
+# ── Batch / accumulation (Section 10) ────────────────────────────────────────
+batch_size: 8                           # Per-GPU batch size (2 s windows)
+gradient_accumulation_steps: 4          # Effective batch = 8 × 4 = 32
+num_workers: 4                          # DataLoader workers
+
+# ── Epochs ────────────────────────────────────────────────────────────────────
+epochs:
+  unimodal: 30
+  fixed_fusion: 30
+  reliability_fusion: 50
+  distillation: 20
+
+# ── Mixed precision (Section 10) ─────────────────────────────────────────────
+amp:
+  enabled: true                         # PyTorch AMP (float16)
+  grad_scaler: true
+
+# ── Encoder freeze strategy (Section 8, stage 4) ────────────────────────────
+freeze:
+  freeze_encoders_initial_epochs: 5     # Freeze encoders for stability
+  unfreeze_last_n_blocks: 2             # Then unfreeze last N blocks
+
+# ── Checkpointing ────────────────────────────────────────────────────────────
+checkpoint:
+  save_dir: "artifacts/checkpoints"
+  save_every_n_epochs: 5
+  save_best: true                       # Save best validation model
+  metric_for_best: "val_auroc"          # Select on validation, never test
+  save_config_with_checkpoint: true     # Reproducibility checklist item
+
+# ── Early stopping ───────────────────────────────────────────────────────────
+early_stopping:
+  enabled: true
+  patience: 10
+  min_delta: 1.0e-4
+
+# ── Seeds (reproducibility checklist: three final seeds) ──────────────────────
+seeds: [42, 123, 7]
+
+# ── Modality-specific augmentation (Section 6, training augmentation) ────────
+augmentation:
+  # Apply one modality at a time in many batches
+  video:
+    enabled: true
+    resize_prob: 0.3
+    reencode_prob: 0.2
+    blur_prob: 0.2
+    frame_drop_prob: 0.1
+  audio:
+    enabled: true
+    noise_prob: 0.3
+    reverb_prob: 0.2
+    lowpass_prob: 0.2
+    dropout_prob: 0.1
+  joint_degradation: false              # Apply jointly degraded cases later
+  modality_dropout:
+    enabled: true                       # Zero out one modality randomly
+    prob: 0.15                          # Probability of dropping a modality
+
+# ── Class balancing ──────────────────────────────────────────────────────────
+class_balance:
+  balanced_sampling: true               # Balance class sampling each epoch
+  class_weight: null                    # null = use balanced sampling instead
