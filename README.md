@@ -27,6 +27,8 @@ Set either dataset root only if you have access to that dataset. The code uses t
 - **FakeAVCeleb:** request access through the [official dataset page](https://sites.google.com/view/fakeavcelebdash-lab/download) and its linked request form. The form requires researcher and institution details and explicit agreement to the terms. Access is not automated by this project.
 - **DFDC:** follow Meta's [official access page](https://ai.meta.com/datasets/dfdc/). It currently requires an AWS account, an IAM user with access keys, and the AWS account number. DFDC is used here for visual-transfer experiments; its audio labels are not treated as verified.
 
+See [`docs/DATASETS.md`](docs/DATASETS.md) for alternative dataset candidates, modality caveats, access notes, and storage planning for the Linux environment.
+
 Do not put dataset files under tracked source directories or commit them. After access is granted, set roots outside the repository, for example:
 
 ```powershell
