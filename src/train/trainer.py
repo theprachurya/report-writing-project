@@ -294,13 +294,20 @@ class Trainer:
             if epoch == self.freeze_encoder_epochs + 1 and self.freeze_encoder_epochs > 0:
                 self._unfreeze_last_encoder_blocks()
 
+            if hasattr(self.loss_fn, "set_epoch"):
+                self.loss_fn.set_epoch(epoch)
+
             # Train
             train_metrics = self.train_epoch(train_loader, epoch)
             val_metrics = self.validate(val_loader, epoch)
 
-            # Scheduler step
+            # Scheduler step: check if ReduceLROnPlateau and pass validation metric
             if self.scheduler is not None:
-                self.scheduler.step()
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    val_metric = val_metrics.get(self.metric_for_best, val_metrics.get("val_loss", 0.0))
+                    self.scheduler.step(val_metric)
+                else:
+                    self.scheduler.step()
 
             elapsed = time.time() - t0
             logger.info(
@@ -334,10 +341,57 @@ class Trainer:
                 logger.info("Early stopping at epoch %d", epoch)
                 break
 
+        if self.save_best and (self.ckpt_dir / "best_model.pt").is_file():
+            logger.info("Restoring best model checkpoint weights from %s", self.ckpt_dir / "best_model.pt")
+            try:
+                self.load_checkpoint(self.ckpt_dir / "best_model.pt", weights_only=True)
+            except Exception as exc:
+                logger.warning("Could not restore best model checkpoint: %s", exc)
+
         if self.exp_logger:
             self.exp_logger.finish()
 
         return history
+
+    def load_checkpoint(
+        self,
+        checkpoint_path: Path | str,
+        weights_only: bool = True,
+        restore_training_state: bool = False,
+    ) -> dict[str, Any]:
+        """Load a checkpoint with weights_only support and optional state restoration.
+
+        Parameters
+        ----------
+        checkpoint_path:
+            Path to the checkpoint file.
+        weights_only:
+            Whether to use PyTorch's weights_only load (default True).
+            Falls back safely to False if custom objects are present.
+        restore_training_state:
+            Whether to restore optimizer, scaler, and scheduler states.
+
+        Returns
+        -------
+        dict[str, Any]
+            The loaded checkpoint dictionary.
+        """
+        checkpoint_path = Path(checkpoint_path)
+        try:
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=weights_only)
+        except Exception:
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+        if "model_state_dict" in ckpt:
+            self.model.load_state_dict(ckpt["model_state_dict"])
+        if restore_training_state:
+            if "optimizer_state_dict" in ckpt and self.optimizer is not None:
+                self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            if "scaler_state_dict" in ckpt and ckpt["scaler_state_dict"] is not None and self.scaler is not None:
+                self.scaler.load_state_dict(ckpt["scaler_state_dict"])
+            if "scheduler_state_dict" in ckpt and ckpt["scheduler_state_dict"] is not None and self.scheduler is not None:
+                self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        return ckpt
 
     def _unfreeze_last_encoder_blocks(self) -> None:
         """Unfreeze the configured final blocks after the encoder warm-up."""
@@ -371,15 +425,28 @@ class Trainer:
         config_dict: dict[str, Any] | None = None,
         is_best: bool = False,
     ) -> None:
-        """Save a model checkpoint."""
+        """Save a model checkpoint with scaler, scheduler, and RNG state."""
+        import random
+        import numpy as np
+
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         name = "best_model.pt" if is_best else f"checkpoint_epoch_{epoch}.pt"
         path = self.ckpt_dir / name
+
+        seed_state = {
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+        }
 
         torch.save({
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "scaler_state_dict": self.scaler.state_dict() if self.scaler is not None else None,
+            "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
+            "seed_state": seed_state,
             "metrics": metrics,
             "global_step": self.global_step,
             "best_metric": self.best_metric,
@@ -392,8 +459,14 @@ class Trainer:
         logger.info("Checkpoint saved: %s", path)
 
     def _to_device(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Move a batch dict to the target device."""
-        return {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
+        """Move a batch dict to the target device, ensuring float32 precision."""
+        result = {}
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                t = v.to(self.device)
+                if t.is_floating_point() and t.dtype == torch.float64:
+                    t = t.float()
+                result[k] = t
+            else:
+                result[k] = v
+        return result

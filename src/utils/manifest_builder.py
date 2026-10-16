@@ -7,12 +7,16 @@ family, and audio condition metadata. See AGENTS.md for build order.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import logging
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
+
+from src.utils.hashing import compute_file_hash
 
 logger = logging.getLogger(__name__)
 
@@ -34,27 +38,7 @@ SOURCE_TABLE_COLUMNS = [
     "file_hash",            # SHA-256 hash for deduplication
 ]
 
-
-def _compute_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
-    """Compute a cryptographic hash of a file for deduplication.
-
-    Parameters
-    ----------
-    file_path:
-        Path to the file.
-    algorithm:
-        Hash algorithm (default ``"sha256"``).
-
-    Returns
-    -------
-    str
-        Hex-encoded hash digest.
-    """
-    h = hashlib.new(algorithm)
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
+_compute_file_hash = compute_file_hash
 
 
 def _parse_fakeavceleb_metadata(
@@ -62,11 +46,8 @@ def _parse_fakeavceleb_metadata(
 ) -> list[dict[str, Any]]:
     """Parse FakeAVCeleb dataset directory structure into source-table rows.
 
-    Expected layout (approximate):
-    ``<root>/RealVideo-RealAudio/<identity>/*.mp4``
-    ``<root>/FakeVideo-RealAudio/<method>/<identity>/*.mp4``
-    ``<root>/FakeVideo-FakeAudio/<method>/<identity>/*.mp4``
-    ``<root>/RealVideo-FakeAudio/<identity>/*.mp4``
+    Checks first for the official ``meta_data.csv`` metadata file in ``root``.
+    If absent, falls back to walking the directory structure.
 
     Parameters
     ----------
@@ -79,6 +60,89 @@ def _parse_fakeavceleb_metadata(
         Rows for the source table.
     """
     rows: list[dict[str, Any]] = []
+
+    # Check for canonical metadata CSV first
+    for candidate in ("meta_data.csv", "metadata.csv"):
+        meta_csv = root / candidate
+        if meta_csv.is_file():
+            logger.info("Parsing FakeAVCeleb using official metadata file: %s", meta_csv)
+            seen_paths: set[str] = set()
+            with open(meta_csv, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header_row = next(reader, None)
+                if not header_row:
+                    continue
+                header_map = {col.strip().lower(): i for i, col in enumerate(header_row) if col.strip()}
+                source_idx = header_map.get("source", 0)
+                method_idx = header_map.get("method", 3)
+                type_idx = header_map.get("type", header_map.get("category", 5))
+                fname_idx = header_map.get("path", header_map.get("filename", 8))
+                folder_idx = header_map.get("folder", header_map.get("directory", 9 if len(header_row) > 9 else 8))
+                min_len = max(source_idx, method_idx, type_idx, fname_idx, folder_idx) + 1
+
+                for row in reader:
+                    if len(row) < min_len:
+                        continue
+                    source = row[source_idx].strip()
+                    method = row[method_idx].strip()
+                    cat_type = row[type_idx].strip()
+                    fname = row[fname_idx].strip()
+                    folder = row[folder_idx].strip()
+
+                    folder_clean = (
+                        folder[len("FakeAVCeleb/"):]
+                        if folder.startswith("FakeAVCeleb/")
+                        else folder
+                    )
+                    rel_path = f"{folder_clean}/{fname}"
+                    if not (root / rel_path).is_file():
+                        continue
+                    if rel_path in seen_paths:
+                        continue
+                    seen_paths.add(rel_path)
+
+                    type_lower = cat_type.lower()
+                    if "realvideo" in type_lower and "realaudio" in type_lower:
+                        video_manip = False
+                        audio_manip = False
+                        manip_family = "real"
+                        audio_cond = "original"
+                    elif "realvideo" in type_lower and "fakeaudio" in type_lower:
+                        video_manip = False
+                        audio_manip = True
+                        manip_family = f"audio_{method.lower()}" if method else "fakeaudio"
+                        audio_cond = "tts" if "tts" in method.lower() else "voice_conversion"
+                    elif "fakevideo" in type_lower and "realaudio" in type_lower:
+                        video_manip = True
+                        audio_manip = False
+                        manip_family = method.lower()
+                        audio_cond = "original"
+                    else:
+                        video_manip = True
+                        audio_manip = True
+                        manip_family = method.lower()
+                        audio_cond = "tts" if "tts" in method.lower() else "voice_conversion"
+
+                    stable_id = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:16]
+                    src_video = fname.split("_")[0] if "_" in fname else fname.split(".")[0]
+                    rows.append({
+                        "clip_id": f"fakeavceleb_{stable_id}",
+                        "dataset": "fakeavceleb",
+                        "source_identity": str(source),
+                        "source_video": src_video,
+                        "manipulation_family": manip_family,
+                        "video_manipulated": video_manip,
+                        "audio_manipulated": audio_manip,
+                        "clip_fake": video_manip or audio_manip,
+                        "audio_condition": audio_cond,
+                        "file_path": rel_path,
+                        "duration_s": None,
+                        "file_hash": "",
+                    })
+            if rows:
+                return rows
+
+    # Fallback to directory walk if meta_data.csv is not present
     video_extensions = {".mp4", ".avi", ".mkv", ".mov", ".webm"}
 
     for category_dir in sorted(root.iterdir()):
@@ -95,7 +159,7 @@ def _parse_fakeavceleb_metadata(
         elif "fakevideo" in category and "realaudio" in category:
             video_manip = True
             audio_manip = False
-            manip_family = "unknown"  # Will be refined by sub-directory
+            manip_family = "unknown"
             audio_cond = "original"
         elif "fakevideo" in category and "fakeaudio" in category:
             video_manip = True
@@ -105,7 +169,7 @@ def _parse_fakeavceleb_metadata(
         elif "realvideo" in category and "fakeaudio" in category:
             video_manip = False
             audio_manip = True
-            manip_family = "real"
+            manip_family = "fakeaudio"
             audio_cond = "tts"
         else:
             logger.warning("Unrecognized category: %s", category)
@@ -122,25 +186,23 @@ def _parse_fakeavceleb_metadata(
             relative = clip_path.relative_to(category_dir)
             parts = relative.parts
 
-            if (video_manip or audio_manip) and len(parts) >= 3:
-                # Common FakeAVCeleb form: method/identity/clip.ext.
-                method = parts[0].lower()
+            if len(parts) >= 3 and parts[-2].startswith("id"):
                 identity = parts[-2]
-                if video_manip:
-                    clip_family = method
-                else:
-                    clip_family = f"audio_{method}"
-                if audio_manip:
-                    audio_cond = "tts" if "tts" in method else "voice_conversion"
-            elif video_manip or audio_manip:
-                # Some releases omit one directory level; preserve a stable
-                # identity key and mark the family conservatively.
-                method = parts[0].lower() if parts else "unknown"
-                identity = parts[-2] if len(parts) >= 2 else "unknown"
-                clip_family = method if video_manip else f"audio_{audio_cond}"
+                method = parts[0].lower()
+            elif len(parts) >= 2:
+                identity = parts[-2]
+                method = parts[0].lower()
             else:
-                # Real: identity/file.mp4
                 identity = parts[0] if parts else "unknown"
+                method = "unknown"
+
+            clip_audio_cond = audio_cond
+            if video_manip:
+                clip_family = method
+            elif audio_manip:
+                clip_family = f"audio_{method}" if method != "unknown" else manip_family
+                clip_audio_cond = "tts" if "tts" in method else "voice_conversion"
+            else:
                 clip_family = manip_family
 
             relative_path = str(clip_path.relative_to(root))
@@ -155,7 +217,7 @@ def _parse_fakeavceleb_metadata(
                 "video_manipulated": video_manip,
                 "audio_manipulated": audio_manip,
                 "clip_fake": video_manip or audio_manip,
-                "audio_condition": audio_cond,
+                "audio_condition": clip_audio_cond,
                 "file_path": relative_path,
                 "duration_s": None,
                 "file_hash": "",
@@ -296,12 +358,13 @@ def build_source_table(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
+    clip_fake_bool = df["clip_fake"].astype(bool)
     logger.info(
         "Source table saved: %d clips → %s (real=%d, fake=%d)",
         len(df),
         output_path,
-        int((~df["clip_fake"]).sum()),
-        int(df["clip_fake"].sum()),
+        int((~clip_fake_bool).sum()),
+        int(clip_fake_bool.sum()),
     )
 
     return df
@@ -319,9 +382,28 @@ def validate_source_table(source_table: pd.DataFrame) -> None:
         raise ValueError("clip_id values must be present and unique")
     if source_table["source_identity"].isna().any() or (source_table["source_identity"].astype(str).str.len() == 0).any():
         raise ValueError("Every clip must have a non-empty source_identity")
-    labels = pd.to_numeric(source_table["clip_fake"], errors="coerce")
-    if labels.isna().any() or not labels.isin([0, 1]).all():
-        raise ValueError("clip_fake must contain only binary labels 0/1")
+
+    def _to_binary_label(val: Any) -> int | None:
+        if isinstance(val, (bool, np.bool_)):
+            return 1 if val else 0
+        if isinstance(val, (int, np.integer)):
+            return int(val) if val in (0, 1) else None
+        if isinstance(val, (float, np.floating)):
+            if np.isnan(val):
+                return None
+            return int(val) if val in (0.0, 1.0) else None
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("true", "1", "yes", "t"):
+                return 1
+            if s in ("false", "0", "no", "f"):
+                return 0
+            return None
+        return None
+
+    labels = source_table["clip_fake"].map(_to_binary_label)
+    if labels.isna().any():
+        raise ValueError("clip_fake must contain only binary labels 0/1 or boolean True/False")
     empty_paths = source_table["file_path"].isna() | (source_table["file_path"].astype(str).str.len() == 0)
     if empty_paths.any():
         raise ValueError("Every clip must have a non-empty file_path")

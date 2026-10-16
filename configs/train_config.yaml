@@ -13,6 +13,7 @@ loss:
   gamma: 0.05                           # Optional contrastive (InfoNCE) weight
   eta: 0.0                              # Balance regularization; brief warm-up only
   tau_r: 1.0                            # Temperature for detached soft target t_m
+  label_smoothing: 0.05                 # Regularization to prevent overconfidence on training identities
 
 # ── Optimizer ─────────────────────────────────────────────────────────────────
 optimizer:
@@ -92,4 +93,5 @@ augmentation:
 # ── Class balancing ──────────────────────────────────────────────────────────
 class_balance:
   balanced_sampling: true               # Balance class sampling each epoch
+  samples_per_epoch: 1400               # Balanced subsample per epoch (prevents real-class memorization on CPU)
   class_weight: null                    # null = use balanced sampling instead

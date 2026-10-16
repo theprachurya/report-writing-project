@@ -48,7 +48,7 @@ class ModalityHead(nn.Module):
         )
 
     def forward(
-        self, z: torch.Tensor
+        self, z: torch.Tensor, missing: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor]:
         """Forward pass through the modality head.
 
@@ -56,6 +56,9 @@ class ModalityHead(nn.Module):
         ----------
         z:
             Encoder output of shape ``(B, T, D)`` or ``(B, D)`` (already pooled).
+        missing:
+            Optional missingness flag ``(B, 1)`` or ``(B,)``. If true/1.0,
+            outputs are neutralized (logit=0, prob=0.5, uncertainty=1.0).
 
         Returns
         -------
@@ -74,9 +77,17 @@ class ModalityHead(nn.Module):
         logit = self.classifier(pooled)  # (B, 1)
         prob = torch.sigmoid(logit)
 
-        # Uncertainty: high when prob ≈ 0.5, low when confident
-        # Uses 1 - |2p - 1| so uncertainty ∈ [0, 1]
+        # Uncertainty proxy per PROJECT_BRIEF Section 7.1/7.2:
+        # High when prob ≈ 0.5 (uncertainty = 1.0), low when confident near 0 or 1 (uncertainty = 0.0)
         uncertainty = 1.0 - torch.abs(2.0 * prob - 1.0)
+
+        # If modality is missing, neutralize outputs cleanly rather than passing raw zero activations
+        if missing is not None:
+            m_mask = missing.reshape(z.shape[0], 1).to(device=z.device) >= 0.5
+            logit = logit.masked_fill(m_mask, 0.0)
+            prob = prob.masked_fill(m_mask, 0.5)
+            uncertainty = uncertainty.masked_fill(m_mask, 1.0)
+            pooled = pooled.masked_fill(m_mask, 0.0)
 
         return {
             "logit": logit,
@@ -113,6 +124,8 @@ class ModalityHeads(nn.Module):
         self,
         z_v: torch.Tensor,
         z_a: torch.Tensor,
+        visual_missing: torch.Tensor | None = None,
+        audio_missing: torch.Tensor | None = None,
     ) -> dict[str, dict[str, torch.Tensor]]:
         """Forward pass through both modality heads.
 
@@ -122,6 +135,10 @@ class ModalityHeads(nn.Module):
             Visual encoder output ``(B, T, D)`` or ``(B, D)``.
         z_a:
             Audio encoder output ``(B, T, D)`` or ``(B, D)``.
+        visual_missing:
+            Optional visual missing mask ``(B, 1)``.
+        audio_missing:
+            Optional audio missing mask ``(B, 1)``.
 
         Returns
         -------
@@ -130,6 +147,6 @@ class ModalityHeads(nn.Module):
             ``logit``, ``prob``, ``uncertainty``, ``pooled_features``.
         """
         return {
-            "visual": self.visual_head(z_v),
-            "audio": self.audio_head(z_a),
+            "visual": self.visual_head(z_v, missing=visual_missing),
+            "audio": self.audio_head(z_a, missing=audio_missing),
         }

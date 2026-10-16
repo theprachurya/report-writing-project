@@ -114,6 +114,20 @@ class FullModel(nn.Module):
         if not use_gate and fusion_mode == "reliability":
             fusion_mode = "equal_weight"
 
+        # Dynamically compute reliability_input_dim:
+        # Visual: pooled stats (ve.embedding_dim) + uncertainty (1)
+        # Audio: pooled stats (ae.embedding_dim) + uncertainty (1)
+        # Quality: visual_dim + audio_dim (if use_quality)
+        # Synchronization: output_dim (if use_sync)
+        # Modality missingness flags: 2 (visual_missing, audio_missing)
+        reliability_input_dim = ve.embedding_dim + 1 + ae.embedding_dim + 1
+        if use_quality:
+            reliability_input_dim += qf.visual_dim + qf.audio_dim
+        if use_sync:
+            reliability_input_dim += sf.output_dim
+        reliability_input_dim += 2
+        self.reliability_input_dim = reliability_input_dim
+
         self.reliability_estimator = ReliabilityEstimator(
             visual_feature_dim=ve.embedding_dim,
             audio_feature_dim=ae.embedding_dim,
@@ -215,8 +229,12 @@ class FullModel(nn.Module):
             unavailable |= audio_missing.reshape(B, 1).to(device) >= 0.5
         sync_features = sync_features.masked_fill(unavailable, 0.0)
 
-        # 4. Modality heads
-        head_outputs = self.modality_heads(z_v, z_a)
+        # 4. Modality heads - neutralize outputs cleanly when modality is missing
+        head_outputs = self.modality_heads(
+            z_v, z_a,
+            visual_missing=visual_missing,
+            audio_missing=audio_missing,
+        )
         p_v = head_outputs["visual"]["prob"]
         p_a = head_outputs["audio"]["prob"]
         logit_v = head_outputs["visual"]["logit"]
@@ -225,6 +243,20 @@ class FullModel(nn.Module):
         uncertainty_a = head_outputs["audio"]["uncertainty"]
         pooled_v = head_outputs["visual"]["pooled_features"]
         pooled_a = head_outputs["audio"]["pooled_features"]
+
+        if visual_missing is not None:
+            vm_mask = (visual_missing.reshape(B, 1).to(device) >= 0.5)
+            logit_v = logit_v.masked_fill(vm_mask, 0.0)
+            p_v = p_v.masked_fill(vm_mask, 0.5)
+            uncertainty_v = uncertainty_v.masked_fill(vm_mask, 1.0)
+            pooled_v = pooled_v.masked_fill(vm_mask, 0.0)
+
+        if audio_missing is not None:
+            am_mask = (audio_missing.reshape(B, 1).to(device) >= 0.5)
+            logit_a = logit_a.masked_fill(am_mask, 0.0)
+            p_a = p_a.masked_fill(am_mask, 0.5)
+            uncertainty_a = uncertainty_a.masked_fill(am_mask, 1.0)
+            pooled_a = pooled_a.masked_fill(am_mask, 0.0)
 
         # 5. Reliability gate
         gate_out = self.reliability_estimator(
@@ -244,6 +276,10 @@ class FullModel(nn.Module):
         # 6. Mean-pool encoder outputs for fusion
         z_v_bar = z_v.mean(dim=1)  # (B, D)
         z_a_bar = z_a.mean(dim=1)  # (B, D)
+        if visual_missing is not None:
+            z_v_bar = z_v_bar.masked_fill(visual_missing.reshape(B, 1).to(device) >= 0.5, 0.0)
+        if audio_missing is not None:
+            z_a_bar = z_a_bar.masked_fill(audio_missing.reshape(B, 1).to(device) >= 0.5, 0.0)
 
         # 7. Fusion classifier
         fusion_out = self.fusion_classifier(

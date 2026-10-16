@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -51,8 +51,8 @@ class DiscriminationMetrics:
     confusion_matrix: list[list[int]] = field(default_factory=lambda: [[0, 0], [0, 0]])
     threshold: float = 0.5
 
-    def to_dict(self) -> dict[str, float]:
-        """Convert to a flat dictionary for logging."""
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a dictionary for logging."""
         return {
             "roc_auc": self.roc_auc,
             "pr_auc": self.pr_auc,
@@ -61,6 +61,7 @@ class DiscriminationMetrics:
             "precision": self.precision,
             "recall": self.recall,
             "specificity": self.specificity,
+            "confusion_matrix": self.confusion_matrix,
             "threshold": self.threshold,
         }
 
@@ -84,18 +85,57 @@ def find_optimal_threshold(
     Returns
     -------
     float
-        Optimal threshold.
+        Optimal threshold clipped to [0.0, 1.0].
     """
     from sklearn.metrics import roc_curve
+
+    targets = np.asarray(targets).flatten()
+    probabilities = np.asarray(probabilities).flatten()
+
+    if len(np.unique(targets)) < 2:
+        return 0.5
 
     fpr, tpr, thresholds = roc_curve(targets, probabilities)
 
     if method == "youden_j":
         j_scores = tpr - fpr
         best_idx = int(np.argmax(j_scores))
-        return float(thresholds[best_idx])
+        return float(np.clip(thresholds[best_idx], 0.0, 1.0))
     else:
         raise ValueError(f"Unknown threshold method: {method}")
+
+
+def compute_prauc(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+) -> float:
+    """Compute Area Under the Precision-Recall Curve (PR-AUC).
+
+    Guards against single-class case where average_precision_score would raise
+    or be undefined.
+
+    Parameters
+    ----------
+    targets:
+        Binary ground truth ``(N,)``.
+    probabilities:
+        Predicted probabilities ``(N,)``.
+
+    Returns
+    -------
+    float
+        PR-AUC score, or 0.0 if only one class is present.
+    """
+    from sklearn.metrics import average_precision_score
+
+    targets = np.asarray(targets).flatten()
+    probabilities = np.asarray(probabilities).flatten()
+
+    if len(np.unique(targets)) < 2:
+        logger.warning("Only one class present — PR-AUC undefined.")
+        return 0.0
+
+    return float(average_precision_score(targets, probabilities))
 
 
 def compute_discrimination_metrics(
@@ -124,7 +164,6 @@ def compute_discrimination_metrics(
         All computed metrics.
     """
     from sklearn.metrics import (
-        average_precision_score,
         balanced_accuracy_score,
         confusion_matrix,
         f1_score,
@@ -137,18 +176,20 @@ def compute_discrimination_metrics(
     probabilities = np.asarray(probabilities).flatten()
 
     # ROC-AUC
-    if len(set(targets)) > 1:
+    if len(np.unique(targets)) > 1:
         roc_auc = float(roc_auc_score(targets, probabilities))
     else:
         roc_auc = 0.0
         logger.warning("Only one class present — ROC-AUC undefined.")
 
     # PR-AUC
-    pr_auc = float(average_precision_score(targets, probabilities))
+    pr_auc = compute_prauc(targets, probabilities)
 
     # Find threshold
     if threshold is None:
         threshold = find_optimal_threshold(targets, probabilities, threshold_method)
+    else:
+        threshold = float(np.clip(threshold, 0.0, 1.0))
 
     # Binary predictions
     predictions = (probabilities >= threshold).astype(int)
@@ -158,7 +199,10 @@ def compute_discrimination_metrics(
     tn, fp, fn, tp = cm.ravel()
 
     # Metrics at threshold
-    bal_acc = float(balanced_accuracy_score(targets, predictions))
+    if len(np.unique(targets)) > 1:
+        bal_acc = float(balanced_accuracy_score(targets, predictions))
+    else:
+        bal_acc = float(np.mean(targets == predictions))
     f1 = float(f1_score(targets, predictions, zero_division=0))
     prec = float(precision_score(targets, predictions, zero_division=0))
     rec = float(recall_score(targets, predictions, zero_division=0))
@@ -185,6 +229,7 @@ def bootstrap_confidence_interval(
     confidence_level: float = 0.95,
     seed: int = 42,
     stratify_by: np.ndarray | None = None,
+    threshold: float = 0.5,
 ) -> tuple[float, float, float]:
     """Compute bootstrap confidence intervals for a metric.
 
@@ -204,6 +249,8 @@ def bootstrap_confidence_interval(
         Random seed.
     stratify_by:
         Optional group labels for stratified bootstrap.
+    threshold:
+        Decision threshold for balanced accuracy (validation-selected).
 
     Returns
     -------
@@ -211,7 +258,6 @@ def bootstrap_confidence_interval(
         ``(point_estimate, lower_bound, upper_bound)``.
     """
     from sklearn.metrics import (
-        average_precision_score,
         balanced_accuracy_score,
         roc_auc_score,
     )
@@ -225,14 +271,14 @@ def bootstrap_confidence_interval(
         raise ValueError("stratify_by must have one group label per sample")
 
     def _compute(t: np.ndarray, p: np.ndarray) -> float:
-        if len(set(t)) < 2:
+        if len(np.unique(t)) < 2:
             return 0.0
         if metric_fn == "roc_auc":
             return float(roc_auc_score(t, p))
         elif metric_fn == "pr_auc":
-            return float(average_precision_score(t, p))
+            return compute_prauc(t, p)
         elif metric_fn == "balanced_accuracy":
-            preds = (p >= 0.5).astype(int)
+            preds = (p >= threshold).astype(int)
             return float(balanced_accuracy_score(t, preds))
         else:
             raise ValueError(f"Unknown metric: {metric_fn}")

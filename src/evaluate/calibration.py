@@ -56,14 +56,44 @@ class CalibrationMetrics:
         }
 
 
-def compute_calibration_metrics(
+def compute_nll(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+    eps: float = 1e-7,
+) -> float:
+    """Compute negative log-likelihood with clipped probabilities.
+
+    Parameters
+    ----------
+    targets:
+        Binary ground truth ``(N,)``.
+    probabilities:
+        Predicted probabilities ``(N,)``.
+    eps:
+        Epsilon for numerical stability when clipping probabilities.
+
+    Returns
+    -------
+    float
+        Negative log-likelihood.
+    """
+    targets = np.asarray(targets).flatten().astype(float)
+    probs = np.asarray(probabilities).flatten()
+    probs = np.clip(probs, eps, 1.0 - eps)
+    return float(-np.mean(
+        targets * np.log(probs) + (1.0 - targets) * np.log(1.0 - probs)
+    ))
+
+
+def compute_ece(
     targets: np.ndarray,
     probabilities: np.ndarray,
     n_bins: int = 15,
-) -> CalibrationMetrics:
-    """Compute calibration metrics per Section 9.3.
+    strategy: str = "equal_mass",
+) -> float:
+    """Compute Expected Calibration Error (ECE) per Section 9.3.
 
-    Uses equal-mass (quantile) bins for ECE.
+    Default strategy matches 15 equal-mass bins per PROJECT_BRIEF Section 9.3.
 
     Parameters
     ----------
@@ -72,7 +102,78 @@ def compute_calibration_metrics(
     probabilities:
         Predicted probabilities ``(N,)``.
     n_bins:
-        Number of equal-mass bins for ECE (default 15).
+        Number of bins (default 15 per Section 9.3).
+    strategy:
+        Binning strategy: ``"equal_mass"`` (default) or ``"equal_width"``.
+
+    Returns
+    -------
+    float
+        Expected Calibration Error.
+    """
+    targets = np.asarray(targets).flatten().astype(float)
+    probs = np.asarray(probabilities).flatten()
+    n = len(targets)
+    if n == 0:
+        return 0.0
+
+    if strategy == "equal_mass":
+        sorted_idx = np.argsort(probs)
+        bin_size = max(1, n // n_bins)
+        ece = 0.0
+        for i in range(n_bins):
+            start = i * bin_size
+            end = start + bin_size if i < n_bins - 1 else n
+            if start >= n:
+                break
+            bin_idx = sorted_idx[start:end]
+            bin_targets = targets[bin_idx]
+            bin_probs = probs[bin_idx]
+            bin_n = len(bin_idx)
+            if bin_n > 0:
+                acc = float(np.mean(bin_targets))
+                conf = float(np.mean(bin_probs))
+                ece += (bin_n / n) * abs(acc - conf)
+        return float(ece)
+    elif strategy == "equal_width":
+        bin_limits = np.linspace(0.0, 1.0, n_bins + 1)
+        ece = 0.0
+        for i in range(n_bins):
+            low, high = bin_limits[i], bin_limits[i + 1]
+            if i == n_bins - 1:
+                mask = (probs >= low) & (probs <= high)
+            else:
+                mask = (probs >= low) & (probs < high)
+            bin_n = int(np.sum(mask))
+            if bin_n > 0:
+                acc = float(np.mean(targets[mask]))
+                conf = float(np.mean(probs[mask]))
+                ece += (bin_n / n) * abs(acc - conf)
+        return float(ece)
+    else:
+        raise ValueError(f"Unknown binning strategy: {strategy}")
+
+
+def compute_calibration_metrics(
+    targets: np.ndarray,
+    probabilities: np.ndarray,
+    n_bins: int = 15,
+    strategy: str = "equal_mass",
+) -> CalibrationMetrics:
+    """Compute calibration metrics per Section 9.3.
+
+    Uses equal-mass (quantile) bins for ECE by default.
+
+    Parameters
+    ----------
+    targets:
+        Binary ground truth ``(N,)``.
+    probabilities:
+        Predicted probabilities ``(N,)``.
+    n_bins:
+        Number of equal-mass bins for ECE (default 15 per Section 9.3).
+    strategy:
+        Binning strategy: ``"equal_mass"`` (default) or ``"equal_width"``.
 
     Returns
     -------
@@ -84,41 +185,50 @@ def compute_calibration_metrics(
     n = len(targets)
 
     # Brier score
-    brier = float(np.mean((probs - targets) ** 2))
+    brier = float(np.mean((probs - targets) ** 2)) if n > 0 else 0.0
 
-    # Negative log-likelihood
-    eps = 1e-7
-    nll = float(-np.mean(
-        targets * np.log(probs + eps) + (1 - targets) * np.log(1 - probs + eps)
-    ))
+    # Negative log-likelihood (with clipped probabilities)
+    nll = compute_nll(targets, probs) if n > 0 else 0.0
 
     # ECE with equal-mass bins (quantile-based)
-    sorted_idx = np.argsort(probs)
-    bin_size = max(1, n // n_bins)
-
     bin_accuracies = []
     bin_confidences = []
     bin_counts = []
-    ece = 0.0
 
-    for i in range(n_bins):
-        start = i * bin_size
-        end = start + bin_size if i < n_bins - 1 else n
-        if start >= n:
-            break
+    if strategy == "equal_mass" and n > 0:
+        sorted_idx = np.argsort(probs)
+        bin_size = max(1, n // n_bins)
+        for i in range(n_bins):
+            start = i * bin_size
+            end = start + bin_size if i < n_bins - 1 else n
+            if start >= n:
+                break
+            bin_idx = sorted_idx[start:end]
+            bin_targets = targets[bin_idx]
+            bin_probs = probs[bin_idx]
+            bin_n = len(bin_idx)
 
-        bin_idx = sorted_idx[start:end]
-        bin_targets = targets[bin_idx]
-        bin_probs = probs[bin_idx]
-        bin_n = len(bin_idx)
+            acc = float(np.mean(bin_targets)) if bin_n > 0 else 0.0
+            conf = float(np.mean(bin_probs)) if bin_n > 0 else 0.0
+            bin_accuracies.append(acc)
+            bin_confidences.append(conf)
+            bin_counts.append(bin_n)
+    elif strategy == "equal_width" and n > 0:
+        bin_limits = np.linspace(0.0, 1.0, n_bins + 1)
+        for i in range(n_bins):
+            low, high = bin_limits[i], bin_limits[i + 1]
+            if i == n_bins - 1:
+                mask = (probs >= low) & (probs <= high)
+            else:
+                mask = (probs >= low) & (probs < high)
+            bin_n = int(np.sum(mask))
+            acc = float(np.mean(targets[mask])) if bin_n > 0 else 0.0
+            conf = float(np.mean(probs[mask])) if bin_n > 0 else float((low + high) / 2)
+            bin_accuracies.append(acc)
+            bin_confidences.append(conf)
+            bin_counts.append(bin_n)
 
-        acc = float(np.mean(bin_targets))
-        conf = float(np.mean(bin_probs))
-        bin_accuracies.append(acc)
-        bin_confidences.append(conf)
-        bin_counts.append(bin_n)
-
-        ece += (bin_n / n) * abs(acc - conf)
+    ece = compute_ece(targets, probs, n_bins=n_bins, strategy=strategy)
 
     return CalibrationMetrics(
         brier_score=brier,
@@ -162,7 +272,8 @@ class TemperatureScaler(nn.Module):
         torch.Tensor
             Temperature-scaled logits.
         """
-        return logits / self.temperature
+        temp = torch.clamp(self.temperature, min=1e-4)
+        return logits / temp
 
     def fit(
         self,
@@ -171,7 +282,7 @@ class TemperatureScaler(nn.Module):
         lr: float = 0.01,
         max_iter: int = 100,
     ) -> float:
-        """Fit temperature on validation logits.
+        """Fit temperature on validation logits using binary cross-entropy with logits.
 
         Parameters
         ----------
@@ -197,12 +308,17 @@ class TemperatureScaler(nn.Module):
 
         def closure():
             optimizer.zero_grad()
+            with torch.no_grad():
+                self.temperature.clamp_(min=1e-4)
             scaled = self.forward(val_logits)
             loss = nll_criterion(scaled, val_targets)
             loss.backward()
             return loss
 
         optimizer.step(closure)
+
+        with torch.no_grad():
+            self.temperature.clamp_(min=1e-4)
 
         learned_temp = float(self.temperature.item())
         logger.info("Temperature scaling fitted: T=%.4f", learned_temp)

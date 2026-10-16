@@ -35,7 +35,11 @@ def preprocess_manifest_row(
     if not clip_path.is_file():
         raise FileNotFoundError(f"Clip from manifest does not exist: {clip_path}")
 
-    cfg = data_config
+    if isinstance(data_config, dict):
+        from src.utils.config_loader import DataConfig, _build_dataclass
+        cfg = _build_dataclass(DataConfig, data_config)
+    else:
+        cfg = data_config
     video = None
     face_valid_mask = np.zeros(cfg.decode.frames_per_window, dtype=bool)
     face_areas = np.zeros(cfg.decode.frames_per_window, dtype=np.float32)

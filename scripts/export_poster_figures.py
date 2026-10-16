@@ -215,6 +215,86 @@ def plot_gate_weight_distribution(
     logger.info("Saved gate weight distribution to %s", path)
 
 
+def format_metric(val: Any, precision: int = 3) -> str:
+    """Safely format metric values for tables/plots without crashing on None, str, or NaN."""
+    if val is None or val == "-":
+        return "-"
+    try:
+        val_float = float(val)
+        if np.isnan(val_float):
+            return "NaN"
+        return f"{val_float:.{precision}f}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
+def plot_reliability_diagram_figure(
+    eval_dir: Path,
+    output_dir: Path,
+    fmt: str = "pdf",
+    dpi: int = 300,
+) -> None:
+    """Generate reliability diagram figure from calibration results.
+
+    Parameters
+    ----------
+    eval_dir:
+        Directory containing evaluation artifacts.
+    output_dir:
+        Output directory for saving the figure.
+    fmt:
+        Output file format (pdf, png, svg).
+    dpi:
+        Output DPI.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.warning("matplotlib not available; skipping reliability diagram.")
+        return
+
+    cal_path = eval_dir / "calibration_results.json"
+    cal = _load_json(cal_path)
+    if cal is None:
+        # Check baseline subdirectories
+        for sub in sorted(eval_dir.glob("baseline_*")):
+            cand = sub / "calibration_results.json"
+            if cand.is_file():
+                cal = _load_json(cand)
+                if cal:
+                    break
+
+    if cal is None:
+        logger.info("No calibration results found for reliability diagram; skipping.")
+        return
+
+    cal_data = cal.get("raw") or cal
+    bin_accs = cal_data.get("bin_accuracies")
+    bin_confs = cal_data.get("bin_confidences")
+
+    if not bin_accs or not bin_confs:
+        logger.info("No bin accuracy/confidence data found for reliability diagram; skipping.")
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.bar(bin_confs, bin_accs, width=0.05, alpha=0.7, label="Model", edgecolor="black")
+    ax.plot([0, 1], [0, 1], "k--", label="Perfect calibration")
+    ax.set_xlabel("Mean Predicted Probability")
+    ax.set_ylabel("Fraction of Positives")
+    ece = cal_data.get("ece", 0.0)
+    brier = cal_data.get("brier_score", 0.0)
+    ax.set_title(f"Reliability Diagram\nECE={format_metric(ece, 4)}, Brier={format_metric(brier, 4)}")
+    ax.legend()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"reliability_diagram.{fmt}"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Saved reliability diagram to %s", path)
+
+
 def generate_ablation_table(
     eval_dir: Path,
     output_dir: Path,
@@ -240,13 +320,13 @@ def generate_ablation_table(
         if disc and "metrics" in disc:
             m = disc["metrics"]
             name = baseline_dir.name.replace("baseline_", "").replace("_", " ").title()
-            ece = cal.get("raw", {}).get("ece", "-") if cal else "-"
+            ece = cal.get("raw", {}).get("ece", "-") if isinstance(cal, dict) else "-"
             rows.append(
-                f"| {name} | {m.get('roc_auc', '-'):.3f} "
-                f"| {m.get('pr_auc', '-'):.3f} "
-                f"| {m.get('f1', '-'):.3f} "
-                f"| {m.get('balanced_accuracy', '-'):.3f} "
-                f"| {ece} |"
+                f"| {name} | {format_metric(m.get('roc_auc'))} "
+                f"| {format_metric(m.get('pr_auc'))} "
+                f"| {format_metric(m.get('f1'))} "
+                f"| {format_metric(m.get('balanced_accuracy'))} "
+                f"| {format_metric(ece)} |"
             )
 
     if len(rows) > 2:
@@ -278,6 +358,7 @@ def main() -> int:
     plot_roc_curve(eval_dir, output_dir, fmt=args.format, dpi=args.dpi)
     plot_degradation_curves(eval_dir, output_dir, fmt=args.format, dpi=args.dpi)
     plot_gate_weight_distribution(eval_dir, output_dir, fmt=args.format, dpi=args.dpi)
+    plot_reliability_diagram_figure(eval_dir, output_dir, fmt=args.format, dpi=args.dpi)
     generate_ablation_table(eval_dir, output_dir)
 
     logger.info("\nPoster figure generation complete. Output dir: %s", output_dir)

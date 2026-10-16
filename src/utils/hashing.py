@@ -1,7 +1,7 @@
 """Computes perceptual/video hashes to detect and block duplicate clips leaking across partitions.
 
 Status: implemented — provides compute_file_hash() (SHA-256), compute_frame_hash()
-(average perceptual hash), and check_cross_partition_duplicates() for verifying no
+(difference hash (dHash)), and check_cross_partition_duplicates() for verifying no
 duplicate clips cross split boundaries. See AGENTS.md for build order.
 """
 
@@ -51,7 +51,7 @@ def compute_file_hash(
 
     h = hashlib.new(algorithm)
     with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
+        for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
 
@@ -60,7 +60,7 @@ def compute_frame_hash(
     frame: np.ndarray,
     hash_size: int = 8,
 ) -> str:
-    """Compute an average perceptual hash of a single video frame.
+    """Compute a difference hash (dHash) of a single video frame.
 
     The perceptual hash is robust to minor re-encoding / resize differences,
     making it suitable for detecting duplicate clips across partitions.
@@ -162,16 +162,20 @@ def compute_video_hash(
 def hamming_distance(hash1: str, hash2: str) -> int:
     """Compute the Hamming distance between two hex hash strings.
 
+    Handles '_' separators in multi-frame video hashes.
+
     Parameters
     ----------
     hash1, hash2:
-        Hex-encoded hash strings (must be same length).
+        Hex-encoded hash strings (must be same length, ignoring '_').
 
     Returns
     -------
     int
         Number of differing bits.
     """
+    hash1 = hash1.replace("_", "")
+    hash2 = hash2.replace("_", "")
     if len(hash1) != len(hash2):
         return max(len(hash1), len(hash2)) * 4  # Max distance
 
@@ -225,8 +229,11 @@ def check_cross_partition_duplicates(
             )
             continue
         for _, row in df.iterrows():
-            h = str(row.get(hash_column, ""))
-            if not h or h == "":
+            val = row.get(hash_column)
+            if pd.isna(val):
+                continue
+            h = str(val).strip()
+            if h == "" or h.lower() in ("nan", "none"):
                 continue
             if h not in hash_to_locations:
                 hash_to_locations[h] = []
@@ -241,6 +248,22 @@ def check_cross_partition_duplicates(
                 "locations": locations,
                 "splits_involved": sorted(split_set),
             })
+
+    if max_hamming_distance > 0:
+        unique_hashes = list(hash_to_locations.keys())
+        for i in range(len(unique_hashes)):
+            for j in range(i + 1, len(unique_hashes)):
+                h1, h2 = unique_hashes[i], unique_hashes[j]
+                if hamming_distance(h1, h2) <= max_hamming_distance:
+                    locs1 = hash_to_locations[h1]
+                    locs2 = hash_to_locations[h2]
+                    combined_splits = set(loc[0] for loc in locs1) | set(loc[0] for loc in locs2)
+                    if len(combined_splits) > 1:
+                        violations.append({
+                            "hash": f"{h1}~{h2}",
+                            "locations": locs1 + locs2,
+                            "splits_involved": sorted(combined_splits),
+                        })
 
     if violations:
         msg = f"Found {len(violations)} cross-partition duplicate(s):\n"

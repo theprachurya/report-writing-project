@@ -10,6 +10,18 @@ reports/*
 !reports/README.md
 !reports/figures/
 !reports/figures/**
+
+# Local report exports and intermediate drafts.
+FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.docx
+FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.pdf
+.~lock.*#
+docs/pbl2_docx_extracted.md
+docs/pbl2_ieee_draft.pdf
+docs/pbl2_ieee_draft.tex
+
+# Generated audit output; source and split manifests remain versioned.
+manifests/data_audit_report.json
+
 *.ckpt
 *.pt
 *.onnx

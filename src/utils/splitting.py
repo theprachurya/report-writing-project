@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -56,10 +56,10 @@ def create_identity_disjoint_split(
     ValueError
         If ratios don't sum to 1.0 (within tolerance).
     """
-    total = train_ratio + val_ratio + test_ratio
-    if abs(total - 1.0) > 1e-6:
+    ratios = [train_ratio, val_ratio, test_ratio]
+    if any(r < 0 for r in ratios) or not (abs(sum(ratios) - 1.0) < 1e-6):
         raise ValueError(
-            f"Split ratios must sum to 1.0, got {total:.4f}"
+            f"Split ratios must sum to 1.0, got {sum(ratios):.4f}"
         )
     required = {"source_identity", "clip_fake"}
     if required - set(source_table.columns):
@@ -67,32 +67,67 @@ def create_identity_disjoint_split(
     if source_table.empty:
         raise ValueError("Cannot create splits from an empty source table")
 
-    # Get unique identities
-    identities = source_table["source_identity"].unique()
-    n_identities = len(identities)
-    logger.info("Splitting %d unique identities into train/val/test", n_identities)
+    # Build connected components of identities linked by shared duplicate file_hashes
+    # (Section 5.3: group all derivatives and clips of one identity together so no duplicates leak)
+    unique_ids = list(source_table["source_identity"].unique())
+    parent: dict[Any, Any] = {i: i for i in unique_ids}
 
-    # Shuffle identities deterministically
+    def _find(i: Any) -> Any:
+        if parent[i] != i:
+            parent[i] = _find(parent[i])
+        return parent[i]
+
+    def _union(i: Any, j: Any) -> None:
+        pi, pj = _find(i), _find(j)
+        if pi != pj:
+            parent[pi] = pj
+
+    if "file_hash" in source_table.columns:
+        valid_hashes = source_table[source_table["file_hash"].astype(str).str.len() > 0]
+        hash_groups = valid_hashes.groupby("file_hash")["source_identity"].unique()
+        for ids in hash_groups:
+            if len(ids) > 1:
+                first = ids[0]
+                for other in ids[1:]:
+                    if first in parent and other in parent:
+                        _union(first, other)
+
+    cluster_map: dict[Any, list[Any]] = {}
+    for ident in unique_ids:
+        root_id = _find(ident)
+        cluster_map.setdefault(root_id, []).append(ident)
+
+    cluster_roots = list(cluster_map.keys())
+    n_clusters = len(cluster_roots)
+    logger.info(
+        "Splitting %d identity clusters (%d unique identities) into train/val/test",
+        n_clusters,
+        len(unique_ids),
+    )
+
     rng = np.random.default_rng(seed)
-    shuffled = rng.permutation(identities)
+    shuffled_clusters = [cluster_roots[i] for i in rng.permutation(n_clusters)]
 
     # Compute split boundaries
-    if n_identities < 3:
-        raise ValueError(f"At least 3 source identities are required for non-empty splits, got {n_identities}")
-    n_train = max(1, int(round(n_identities * train_ratio)))
-    n_val = max(1, int(round(n_identities * val_ratio)))
-    if n_train + n_val >= n_identities:
-        n_train = n_identities - 2
+    if n_clusters < 3:
+        raise ValueError(f"At least 3 source identity clusters are required for non-empty splits, got {n_clusters}")
+    n_train = max(1, int(round(n_clusters * train_ratio)))
+    n_val = max(1, int(round(n_clusters * val_ratio)))
+    if n_train + n_val >= n_clusters:
+        n_train = n_clusters - 2
         n_val = 1
 
-    train_ids = set(shuffled[:n_train])
-    val_ids = set(shuffled[n_train:n_train + n_val])
-    test_ids = set(shuffled[n_train + n_val:])
+    train_ids = {ident for root in shuffled_clusters[:n_train] for ident in cluster_map[root]}
+    val_ids = {ident for root in shuffled_clusters[n_train:n_train + n_val] for ident in cluster_map[root]}
+    test_ids = {ident for root in shuffled_clusters[n_train + n_val:] for ident in cluster_map[root]}
 
     # Verify disjointness
-    assert train_ids.isdisjoint(val_ids), "Train and val identities overlap"
-    assert train_ids.isdisjoint(test_ids), "Train and test identities overlap"
-    assert val_ids.isdisjoint(test_ids), "Val and test identities overlap"
+    if not train_ids.isdisjoint(val_ids):
+        raise ValueError("Train and val identities overlap")
+    if not train_ids.isdisjoint(test_ids):
+        raise ValueError("Train and test identities overlap")
+    if not val_ids.isdisjoint(test_ids):
+        raise ValueError("Val and test identities overlap")
 
     # Build split DataFrames
     splits = {
@@ -127,8 +162,9 @@ def create_identity_disjoint_split(
 
     # Log class balance per split
     for split_name, df in splits.items():
-        n_real = int((~df["clip_fake"]).sum())
-        n_fake = int(df["clip_fake"].sum())
+        clip_fake_bool = df["clip_fake"].astype(bool)
+        n_real = int((~clip_fake_bool).sum())
+        n_fake = int(clip_fake_bool.sum())
         logger.info(
             "  %s class balance: real=%d, fake=%d (%.1f%% fake)",
             split_name,
@@ -217,6 +253,16 @@ def create_cross_manipulation_split(
     seen_splits["test_seen"] = seen_splits.pop("test")
     seen_splits["test_held_out"] = held_out_table
     seen_splits["test_seen"].to_csv(Path(output_dir) / "test_seen_manifest.csv", index=False)
+
+    # Verify that held-out identities are strictly excluded from seen training/val sets
+    for split_key in ("train", "val", "test_seen"):
+        if split_key in seen_splits and not seen_splits[split_key].empty:
+            split_identities = set(seen_splits[split_key]["source_identity"].unique())
+            overlap = split_identities & held_out_identities
+            if overlap:
+                raise ValueError(
+                    f"Held-out manipulation identities leaked into {split_key} split: {overlap}"
+                )
 
     # Save held-out manifest
     output_path = output_dir / "test_held_out_manifest.csv"

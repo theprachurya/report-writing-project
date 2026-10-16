@@ -32,13 +32,16 @@ class AlignmentResult:
     n_bins:
         Number of temporal bins.
     dropped_frames:
-        Frames that couldn't be assigned to any bin.
+        Empty temporal bins or indices of frames that could not be assigned.
+    dropped_frame_indices:
+        Decoder-level dropped frame indices if provided.
     """
     visual_bins: np.ndarray | list[list[int]]
     audio_bins: np.ndarray | list[tuple[int, int]]
     timestamp_transform: list[tuple[float, float]]
     n_bins: int
     dropped_frames: list[int] = field(default_factory=list)
+    dropped_frame_indices: list[int] = field(default_factory=list)
 
 
 class TemporalAligner:
@@ -63,6 +66,7 @@ class TemporalAligner:
         self.n_bins = n_bins
         self.window_duration_s = window_duration_s
         self.bin_duration_s = window_duration_s / n_bins
+        self.timestamp_transform = self.compute_timestamp_transform()
 
     def compute_timestamp_transform(self) -> list[tuple[float, float]]:
         """Compute the (start_s, end_s) range for each temporal bin.
@@ -127,7 +131,6 @@ class TemporalAligner:
             For each bin, ``(start_frame, end_frame)`` slice indices into
             the spectrogram.
         """
-        total_duration = n_spec_frames * hop_length / sample_rate
         bins: list[tuple[int, int]] = []
         for i in range(self.n_bins):
             bin_start_s = i * self.bin_duration_s
@@ -173,6 +176,7 @@ class TemporalAligner:
         self,
         spectrogram_features: np.ndarray,
         spec_bins: list[tuple[int, int]],
+        time_axis: int | None = None,
     ) -> np.ndarray:
         """Pool spectrogram features into temporal bin embeddings.
 
@@ -184,6 +188,10 @@ class TemporalAligner:
         spec_bins:
             Spectrogram-to-bin assignments from
             :meth:`assign_spectrogram_frames_to_bins`.
+        time_axis:
+            Explicit axis corresponding to time frames (0 or 1). If None,
+            orientation is determined robustly using bin slice indices and
+            array dimensions.
 
         Returns
         -------
@@ -191,8 +199,22 @@ class TemporalAligner:
             Pooled features of shape ``(T, D)``.
         """
         # Ensure shape is (T_spec, D) for pooling
-        if spectrogram_features.ndim == 2 and spectrogram_features.shape[0] < spectrogram_features.shape[1]:
-            spec = spectrogram_features.T  # (T_spec, n_mels)
+        if time_axis == 1:
+            spec = spectrogram_features.T
+        elif time_axis == 0:
+            spec = spectrogram_features
+        elif spectrogram_features.ndim == 2:
+            max_bin_idx = max((end for _, end in spec_bins), default=0)
+            if max_bin_idx > spectrogram_features.shape[0] and max_bin_idx <= spectrogram_features.shape[1] + 1:
+                # Axis 1 matches time frames
+                spec = spectrogram_features.T
+            elif max_bin_idx > spectrogram_features.shape[1] and max_bin_idx <= spectrogram_features.shape[0] + 1:
+                # Axis 0 matches time frames
+                spec = spectrogram_features
+            elif spectrogram_features.shape[0] < spectrogram_features.shape[1]:
+                spec = spectrogram_features.T
+            else:
+                spec = spectrogram_features
         else:
             spec = spectrogram_features
 
@@ -214,6 +236,7 @@ class TemporalAligner:
         audio_hop_length: int,
         audio_sample_rate: int,
         window_start_s: float = 0.0,
+        dropped_frame_indices: list[int] | None = None,
     ) -> AlignmentResult:
         """Full alignment pipeline: assign and pool both modalities.
 
@@ -231,11 +254,14 @@ class TemporalAligner:
             Audio sample rate.
         window_start_s:
             Start time of the window.
+        dropped_frame_indices:
+            Decoder-level dropped frame indices if known.
 
         Returns
         -------
         AlignmentResult
-            Aligned visual and audio bin features with timestamp transform.
+            Aligned visual and audio bin features with timestamp transform
+            and dropped frame metadata.
         """
         timestamp_transform = self.compute_timestamp_transform()
 
@@ -265,4 +291,5 @@ class TemporalAligner:
             timestamp_transform=timestamp_transform,
             n_bins=self.n_bins,
             dropped_frames=empty_bins,
+            dropped_frame_indices=list(dropped_frame_indices or []),
         )

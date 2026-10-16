@@ -87,16 +87,17 @@ def compute_log_mel_spectrogram(
 
     # Try torchaudio first for GPU-friendly & exact implementation
     try:
-        mel_spec = _compute_torchaudio(
-            waveform, sample_rate, n_mels, win_length, hop_length, f_min, f_max
+        log_mel = _compute_torchaudio(
+            waveform, sample_rate, n_mels, win_length, hop_length, f_min, f_max, log_offset
         )
-    except ImportError:
+    except (ImportError, RuntimeError, OSError, Exception) as exc:
+        logger.debug("torchaudio failed (%s), falling back to numpy", exc)
+        raw_waveform = waveform.detach().cpu().numpy() if hasattr(waveform, "detach") else np.asarray(waveform)
         mel_spec = _compute_numpy(
-            waveform, sample_rate, n_mels, win_length, hop_length, f_min, f_max
+            raw_waveform, sample_rate, n_mels, win_length, hop_length, f_min, f_max
         )
-
-    # Apply log scaling
-    log_mel = np.log(mel_spec + log_offset).astype(np.float32)
+        # Apply log scaling in float32 precision
+        log_mel = np.log(mel_spec.astype(np.float32) + log_offset).astype(np.float32)
 
     return MelSpectrogramResult(
         spectrogram=log_mel,
@@ -117,12 +118,20 @@ def _compute_torchaudio(
     hop_length: int,
     f_min: float,
     f_max: float,
+    log_offset: float = 1e-6,
 ) -> np.ndarray:
-    """Compute Mel spectrogram using torchaudio."""
+    """Compute log-Mel spectrogram using torchaudio with float32 precision."""
     import torch
     import torchaudio
 
-    tensor = torch.from_numpy(waveform).unsqueeze(0)  # (1, T)
+    if hasattr(waveform, "detach"):
+        tensor = waveform.detach().float()
+    else:
+        tensor = torch.from_numpy(np.asarray(waveform)).float()
+
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(0)  # (1, T)
+
     n_fft = max(win_length, 512)  # At least 512 for reasonable frequency resolution
 
     transform = torchaudio.transforms.MelSpectrogram(
@@ -135,8 +144,10 @@ def _compute_torchaudio(
         f_max=f_max,
         power=2.0,
     )
-    mel = transform(tensor)  # (1, n_mels, T)
-    return mel.squeeze(0).numpy()
+    mel = transform(tensor.float())  # (1, n_mels, T)
+    # Ensure float32 precision for torch.log to prevent float16 underflow/NaN
+    log_mel = torch.log(mel.float() + log_offset)
+    return log_mel.squeeze(0).cpu().numpy()
 
 
 def _compute_numpy(
@@ -190,7 +201,10 @@ def _mel_filterbank(
     f_min: float,
     f_max: float,
 ) -> np.ndarray:
-    """Create a Mel filter bank matrix of shape (n_mels, n_fft // 2 + 1)."""
+    """Create a Mel filter bank matrix of shape (n_mels, n_fft // 2 + 1).
+
+    Ensures no degenerate zero-width filter bins by strictly ordering support points.
+    """
     n_freq = n_fft // 2 + 1
     mel_min = _hz_to_mel(f_min)
     mel_max = _hz_to_mel(f_max)
@@ -198,17 +212,40 @@ def _mel_filterbank(
     hz_points = np.array([_mel_to_hz(m) for m in mel_points])
     bin_points = np.floor((n_fft + 1) * hz_points / sample_rate).astype(int)
 
+    # Enforce strictly increasing bin points to prevent degenerate zero-width bins
+    bin_points = np.clip(bin_points, 0, n_freq - 1)
+    for k in range(1, len(bin_points)):
+        if bin_points[k] <= bin_points[k - 1]:
+            bin_points[k] = min(bin_points[k - 1] + 1, n_freq - 1)
+    for k in range(len(bin_points) - 2, -1, -1):
+        if bin_points[k] >= bin_points[k + 1] and bin_points[k + 1] > 0:
+            bin_points[k] = bin_points[k + 1] - 1
+
     fb = np.zeros((n_mels, n_freq), dtype=np.float32)
     for i in range(n_mels):
-        left = bin_points[i]
-        center = bin_points[i + 1]
-        right = bin_points[i + 2]
+        left = int(bin_points[i])
+        center = int(bin_points[i + 1])
+        right = int(bin_points[i + 2])
+
+        if center <= left:
+            center = left + 1
+        if right <= center:
+            right = center + 1
+        right = min(right, n_freq)
+        center = min(center, n_freq - 1)
+        left = max(0, min(left, center - 1))
+
         # Rising slope
+        denom_up = max(1, center - left)
         for j in range(left, center):
-            if center != left:
-                fb[i, j] = (j - left) / (center - left)
+            fb[i, j] = (j - left) / denom_up
         # Falling slope
+        denom_down = max(1, right - center)
         for j in range(center, right):
-            if right != center:
-                fb[i, j] = (right - j) / (right - center)
+            fb[i, j] = (right - j) / denom_down
+
+        # Degenerate fallback: if filter bank row is all zero, assign center bin
+        if fb[i].sum() == 0:
+            fb[i, min(center, n_freq - 1)] = 1.0
+
     return fb

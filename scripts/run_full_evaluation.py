@@ -67,7 +67,10 @@ def _predict(model: torch.nn.Module, loader: torch.utils.data.DataLoader, device
     model.eval()
     with torch.inference_mode():
         for batch in loader:
-            batch = {key: value.to(device) for key, value in batch.items()}
+            batch = {
+                key: (value.to(device).float() if isinstance(value, torch.Tensor) and value.is_floating_point() else (value.to(device) if isinstance(value, torch.Tensor) else value))
+                for key, value in batch.items()
+            }
             output = model(
                 frames=batch["frames"],
                 mel_spec=batch["mel_spec"],

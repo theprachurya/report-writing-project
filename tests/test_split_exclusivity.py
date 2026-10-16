@@ -115,3 +115,27 @@ def test_cross_manipulation_holdout_exclusivity(tmp_path: Path) -> None:
     assert "faceswap" not in train_fams, "Held-out family found in train set!"
     assert "faceswap" not in val_fams, "Held-out family found in val set!"
     assert test_held_fams == {"faceswap"}, "test_held_out should contain only the held-out family"
+
+    # Held-out family's identities must NEVER appear in train or val
+    held_out_ids = set(splits["test_held_out"]["source_identity"].unique())
+    train_ids = set(splits["train"]["source_identity"].unique())
+    val_ids = set(splits["val"]["source_identity"].unique())
+    assert held_out_ids.isdisjoint(train_ids), "Held-out identities leaked into train set!"
+    assert held_out_ids.isdisjoint(val_ids), "Held-out identities leaked into val set!"
+
+
+def test_split_with_string_clip_fake(tmp_path: Path) -> None:
+    """Verifies that create_identity_disjoint_split handles string/int clip_fake safely."""
+    df = _make_synthetic_source_table()
+    if df is None:
+        pytest.skip("pandas not yet available")
+    df["clip_fake"] = df["clip_fake"].astype(str)  # 'True' / 'False' strings
+    splits = create_identity_disjoint_split(
+        source_table=df,
+        train_ratio=0.70,
+        val_ratio=0.10,
+        test_ratio=0.20,
+        seed=42,
+        output_dir=tmp_path / "splits_str",
+    )
+    assert len(splits["train"]) > 0

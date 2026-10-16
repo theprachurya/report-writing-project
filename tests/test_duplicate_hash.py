@@ -116,3 +116,26 @@ def test_check_cross_partition_duplicates_detected() -> None:
     splits = {"train": train_df, "val": val_df, "test": test_df}
     with pytest.raises(ValueError, match="cross-partition duplicate"):
         check_cross_partition_duplicates(splits, hash_column="file_hash")
+
+
+def test_hamming_distance_with_separators() -> None:
+    """Verifies that hamming_distance handles '_' separators in multi-frame hashes."""
+    assert hamming_distance("00_00", "00_00") == 0
+    assert hamming_distance("0f_00", "00_00") == 4
+    assert hamming_distance("ff_ff", "00_00") == 16
+    assert hamming_distance("1a_2b_3c", "1a_2b_3d") == 1
+
+
+def test_check_cross_partition_duplicates_zero_hash() -> None:
+    """Verifies that valid hash '0' is not skipped and duplicate '0' across splits is caught."""
+    try:
+        import pandas as pd
+    except ImportError:
+        pytest.skip("pandas not yet available")
+
+    splits = {
+        "train": pd.DataFrame({"clip_id": ["c1"], "file_hash": ["0"]}),
+        "val": pd.DataFrame({"clip_id": ["c2"], "file_hash": ["0"]}),
+    }
+    with pytest.raises(ValueError, match="cross-partition duplicate"):
+        check_cross_partition_duplicates(splits, hash_column="file_hash")

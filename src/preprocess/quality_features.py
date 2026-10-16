@@ -32,13 +32,15 @@ class VisualQualityFeatures:
     face_area_mean:
         Mean face bounding-box area (pixels) across detections.
     luminance_mean:
-        Mean luminance (grayscale intensity) across face crops.
+        Mean luminance (grayscale intensity / brightness) across face crops.
     luminance_std:
         Standard deviation of luminance across face crops.
     saturation_mean:
         Mean saturation (HSV S-channel) across face crops.
     failed_frame_fraction:
         Fraction of frames where face detection failed.
+    detection_confidence_mean:
+        Mean detector confidence score across successful detections.
     """
     detection_success_rate: float
     blur_variance: float
@@ -47,6 +49,7 @@ class VisualQualityFeatures:
     luminance_std: float
     saturation_mean: float
     failed_frame_fraction: float
+    detection_confidence_mean: float = 0.0
 
     def to_vector(self) -> np.ndarray:
         """Return features as a 7-D float32 vector."""
@@ -71,18 +74,17 @@ def compute_visual_quality(
     Parameters
     ----------
     crops:
-        List of face crops (RGB uint8, ``crop_size × crop_size × 3``).
+        List of face crops (RGB uint8 or float tensors/arrays).
         ``None`` entries indicate failed detections.
     face_areas:
-        Per-frame face bounding-box areas.  If ``None``, computed from crops.
+        Per-frame face bounding-box areas. If ``None``, computed from crops.
     detection_confidences:
-        Per-frame detector confidences.  Not directly used in the feature
-        vector but logged for diagnostics.
+        Per-frame detector confidences.
 
     Returns
     -------
     VisualQualityFeatures
-        The 7-D quality feature set.
+        The 7-D quality feature set with confidence metadata.
     """
     n_total = len(crops)
     valid_crops = [c for c in crops if c is not None]
@@ -91,6 +93,12 @@ def compute_visual_quality(
 
     detection_rate = n_detected / n_total if n_total > 0 else 0.0
     failed_fraction = n_failed / n_total if n_total > 0 else 1.0
+
+    if detection_confidences is not None:
+        valid_confs = [float(c) for c in detection_confidences if c > 0]
+        conf_mean = float(np.mean(valid_confs)) if valid_confs else 0.0
+    else:
+        conf_mean = 1.0 if n_detected > 0 else 0.0
 
     if n_detected == 0:
         return VisualQualityFeatures(
@@ -101,6 +109,7 @@ def compute_visual_quality(
             luminance_std=0.0,
             saturation_mean=0.0,
             failed_frame_fraction=1.0,
+            detection_confidence_mean=0.0,
         )
 
     # Blur: variance of Laplacian (higher = sharper)
@@ -108,13 +117,35 @@ def compute_visual_quality(
     luminances = []
     saturations = []
     for crop in valid_crops:
-        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        # Convert tensor to numpy array before OpenCV operations
+        if hasattr(crop, "detach"):
+            crop_np = crop.detach().cpu().numpy()
+        else:
+            crop_np = np.asarray(crop)
+
+        # Handle CHW vs HWC layout if necessary
+        if crop_np.ndim == 3 and crop_np.shape[0] in (1, 3) and crop_np.shape[-1] not in (1, 3):
+            crop_np = np.transpose(crop_np, (1, 2, 0))
+
+        # Convert float/normalized crops to uint8 RGB for OpenCV
+        if np.issubdtype(crop_np.dtype, np.floating):
+            if crop_np.min() < 0.0:
+                # Approximate de-normalization if ImageNet normalized
+                crop_np = np.clip((crop_np * 0.225 + 0.45) * 255.0, 0, 255).astype(np.uint8)
+            elif crop_np.max() <= 1.0:
+                crop_np = np.clip(crop_np * 255.0, 0, 255).astype(np.uint8)
+            else:
+                crop_np = np.clip(crop_np, 0, 255).astype(np.uint8)
+        else:
+            crop_np = crop_np.astype(np.uint8)
+
+        gray = cv2.cvtColor(crop_np, cv2.COLOR_RGB2GRAY)
         lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         blur_values.append(lap_var)
 
         luminances.append(float(gray.mean()))
 
-        hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+        hsv = cv2.cvtColor(crop_np, cv2.COLOR_RGB2HSV)
         saturations.append(float(hsv[:, :, 1].mean()))
 
     # Face area
@@ -133,6 +164,7 @@ def compute_visual_quality(
         luminance_std=float(np.std(luminances)),
         saturation_mean=float(np.mean(saturations)),
         failed_frame_fraction=failed_fraction,
+        detection_confidence_mean=conf_mean,
     )
 
 
@@ -183,10 +215,12 @@ def compute_audio_quality(
 ) -> AudioQualityFeatures:
     """Compute audio quality features from a mono waveform.
 
+    Vectorized implementation over NumPy arrays for efficiency.
+
     Parameters
     ----------
     waveform:
-        1-D float32 mono waveform.
+        1-D float32 mono waveform (or torch.Tensor).
     sample_rate:
         Sample rate (default 16000).
     expected_duration_s:
@@ -203,6 +237,10 @@ def compute_audio_quality(
     AudioQualityFeatures
         The 5-D quality feature set.
     """
+    if hasattr(waveform, "detach"):
+        waveform = waveform.detach().cpu().numpy()
+    waveform = np.asarray(waveform, dtype=np.float32).ravel()
+
     if len(waveform) == 0:
         return AudioQualityFeatures(
             vad_fraction=0.0,
@@ -219,39 +257,32 @@ def compute_audio_quality(
     n_clipped = int(np.sum(np.abs(waveform) >= clipping_threshold))
     clipped_ratio = n_clipped / len(waveform)
 
-    # Simple energy-based VAD
+    # Vectorized energy-based VAD and SNR proxy
     frame_size = int(sample_rate * vad_frame_ms / 1000)
-    n_frames = max(1, len(waveform) // frame_size)
-    active_frames = 0
-    for i in range(n_frames):
-        start = i * frame_size
-        end = min(start + frame_size, len(waveform))
-        frame_energy = float(np.sqrt(np.mean(waveform[start:end] ** 2)))
-        if frame_energy > vad_energy_threshold:
-            active_frames += 1
-    vad_fraction = active_frames / n_frames
+    n_frames = len(waveform) // frame_size
 
-    # SNR proxy: ratio of signal power in active frames to noise power in silent frames
-    signal_powers = []
-    noise_powers = []
-    for i in range(n_frames):
-        start = i * frame_size
-        end = min(start + frame_size, len(waveform))
-        frame_power = float(np.mean(waveform[start:end] ** 2))
-        frame_energy = float(np.sqrt(frame_power))
-        if frame_energy > vad_energy_threshold:
-            signal_powers.append(frame_power)
-        else:
-            noise_powers.append(frame_power)
+    if n_frames == 0:
+        frame_powers = np.array([float(np.mean(waveform ** 2))], dtype=np.float32)
+    else:
+        truncated_len = n_frames * frame_size
+        frames_mat = waveform[:truncated_len].reshape(n_frames, frame_size)
+        frame_powers = np.mean(frames_mat ** 2, axis=1)
 
-    if signal_powers and noise_powers:
+    frame_energies = np.sqrt(frame_powers)
+    active_mask = frame_energies > vad_energy_threshold
+    vad_fraction = float(np.mean(active_mask))
+
+    signal_powers = frame_powers[active_mask]
+    noise_powers = frame_powers[~active_mask]
+
+    if len(signal_powers) > 0 and len(noise_powers) > 0:
         mean_signal = float(np.mean(signal_powers))
         mean_noise = float(np.mean(noise_powers))
         if mean_noise > 1e-10:
             snr_proxy = float(10.0 * np.log10(mean_signal / mean_noise))
         else:
             snr_proxy = 60.0  # Very clean signal
-    elif signal_powers:
+    elif len(signal_powers) > 0:
         snr_proxy = 60.0  # No detectable noise frames
     else:
         snr_proxy = 0.0  # No signal detected

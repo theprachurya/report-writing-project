@@ -195,18 +195,25 @@ def main() -> int:
             output_path=source_table_path,
             compute_hashes=not args.skip_file_hashes,
         )
-        validate_source_table(source_table)
-        split_results = create_identity_disjoint_split(
-            source_table,
-            train_ratio=cfg.split.train,
-            val_ratio=cfg.split.val,
-            test_ratio=cfg.split.test,
-            seed=args.seed,
-            output_dir=output_dir / "splits",
-        )
-        verify_split_integrity(split_results)
-        check_cross_partition_duplicates(split_results)
-        logger.info("Created source table and split manifests under %s", output_dir)
+        if len(source_table) == 0:
+            logger.warning("Source table is empty. Skipping split generation.")
+            split_results = {}
+        else:
+            validate_source_table(source_table)
+            split_results = create_identity_disjoint_split(
+                source_table,
+                train_ratio=cfg.split.train,
+                val_ratio=cfg.split.val,
+                test_ratio=cfg.split.test,
+                seed=args.seed,
+                output_dir=output_dir / "splits",
+            )
+            if split_results and any(len(df) > 0 for df in split_results.values()):
+                verify_split_integrity(split_results)
+                check_cross_partition_duplicates(split_results)
+                logger.info("Created source table and split manifests under %s", output_dir)
+            else:
+                logger.warning("Split manifests are empty; skipping integrity verification.")
     else:
         logger.info("No configured licensed dataset root; no dataset manifests were generated.")
 
@@ -253,11 +260,16 @@ def main() -> int:
     else:
         logger.info("Audit executed cleanly with 0 active clip fixtures.")
 
+    split_counts: dict[str, int] = {}
+    if split_results:
+        for name, df in split_results.items():
+            split_counts[name] = len(df) if hasattr(df, "__len__") else 0
+
     report = {
         "seed": args.seed,
         "licensed_dataset_roots": {name: str(root) for name, root in dataset_roots.items()},
         "source_table": str(source_table_path) if dataset_roots else None,
-        "split_counts": {name: len(df) for name, df in split_results.items()},
+        "split_counts": split_counts,
         "audited_clips": audit_results,
         "dataset_manifests_generated": bool(dataset_roots),
     }

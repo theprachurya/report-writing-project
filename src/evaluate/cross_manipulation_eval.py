@@ -36,9 +36,9 @@ class CrossManipulationResult:
         Bootstrap 95% CIs for key metrics.
     """
     held_out_family: str
-    seen_metrics: dict[str, float] = field(default_factory=dict)
-    held_out_metrics: dict[str, float] = field(default_factory=dict)
-    per_family_results: dict[str, dict[str, float]] = field(default_factory=dict)
+    seen_metrics: dict[str, Any] = field(default_factory=dict)
+    held_out_metrics: dict[str, Any] = field(default_factory=dict)
+    per_family_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     confidence_intervals: dict[str, tuple[float, float, float]] = field(default_factory=dict)
 
 
@@ -81,13 +81,26 @@ def evaluate_cross_manipulation(
     CrossManipulationResult
         Complete cross-manipulation evaluation.
     """
-    targets = np.asarray(targets)
-    probabilities = np.asarray(probabilities)
-    families = np.asarray(manipulation_families)
+    import warnings
+
+    targets = np.asarray(targets).flatten()
+    probabilities = np.asarray(probabilities).flatten()
+    families = np.asarray(manipulation_families).flatten()
+
+    if len(targets) != len(probabilities) or len(targets) != len(families):
+        raise ValueError(
+            f"Mismatched input lengths: targets={len(targets)}, "
+            f"probabilities={len(probabilities)}, families={len(families)}"
+        )
 
     # Split by held-out vs seen
     held_out_mask = families == held_out_family
     seen_mask = ~held_out_mask
+
+    if held_out_mask.sum() == 0:
+        msg = f"Held-out family '{held_out_family}' not found in provided manipulation families."
+        logger.warning(msg)
+        warnings.warn(msg, UserWarning, stacklevel=2)
 
     result = CrossManipulationResult(held_out_family=held_out_family)
 
@@ -105,34 +118,49 @@ def evaluate_cross_manipulation(
         )
         result.held_out_metrics = ho_metrics.to_dict()
 
-        # Bootstrap CI for held-out
-        for metric_name in ["roc_auc", "pr_auc", "balanced_accuracy"]:
-            point, lower, upper = bootstrap_confidence_interval(
-                targets[held_out_mask],
-                probabilities[held_out_mask],
-                metric_fn=metric_name,
-                n_iterations=n_bootstrap,
-                confidence_level=confidence_level,
-                seed=seed,
-            )
-            result.confidence_intervals[f"held_out_{metric_name}"] = (
-                point, lower, upper
+        # Bootstrap CI for held-out (guarded against single-class case)
+        if len(np.unique(targets[held_out_mask])) > 1:
+            for metric_name in ["roc_auc", "pr_auc", "balanced_accuracy"]:
+                point, lower, upper = bootstrap_confidence_interval(
+                    targets[held_out_mask],
+                    probabilities[held_out_mask],
+                    metric_fn=metric_name,
+                    n_iterations=n_bootstrap,
+                    confidence_level=confidence_level,
+                    seed=seed,
+                    threshold=threshold if threshold is not None else 0.5,
+                )
+                result.confidence_intervals[f"held_out_{metric_name}"] = (
+                    point, lower, upper
+                )
+        else:
+            logger.warning(
+                "Held-out family '%s' contains only one class. Bootstrap CIs are undefined.",
+                held_out_family,
             )
 
-    # Per-family breakdown
+    # Per-family breakdown (guarded against single-class family subsets)
     for family in np.unique(families):
         fam_mask = families == family
         if fam_mask.sum() > 0:
+            fam_targets = targets[fam_mask]
+            fam_probs = probabilities[fam_mask]
+            if len(np.unique(fam_targets)) < 2:
+                logger.info(
+                    "Family '%s' contains only one class (%s). Discriminating AUC metrics are undefined.",
+                    family,
+                    np.unique(fam_targets).tolist(),
+                )
             fam_metrics = compute_discrimination_metrics(
-                targets[fam_mask], probabilities[fam_mask], threshold=threshold
+                fam_targets, fam_probs, threshold=threshold
             )
             result.per_family_results[str(family)] = fam_metrics.to_dict()
 
     logger.info(
         "Cross-manipulation eval: held_out='%s' AUROC=%.4f, seen AUROC=%.4f",
         held_out_family,
-        result.held_out_metrics.get("roc_auc", 0),
-        result.seen_metrics.get("roc_auc", 0),
+        result.held_out_metrics.get("roc_auc", 0.0),
+        result.seen_metrics.get("roc_auc", 0.0),
     )
 
     return result

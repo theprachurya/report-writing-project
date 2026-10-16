@@ -59,9 +59,10 @@ def _load_audio_torchaudio(
     import torchaudio
 
     waveform, sr = torchaudio.load(str(audio_path))
-    # Convert to mono
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
+    # Convert arbitrary channel counts to mono
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    waveform = waveform.mean(dim=0, keepdim=True)
     # Resample if needed
     if sr != target_sr:
         resampler = torchaudio.transforms.Resample(
@@ -180,14 +181,14 @@ def decode_audio(
     if waveform is None:
         try:
             waveform, original_sr = _load_audio_torchaudio(audio_path, target_sr)
-        except (ImportError, RuntimeError) as exc:
+        except (ImportError, RuntimeError, OSError) as exc:
             logger.debug("torchaudio unavailable (%s), falling back to ffmpeg", exc)
             waveform, original_sr = _load_audio_ffmpeg(audio_path, target_sr)
 
     if len(waveform) == 0:
         raise RuntimeError(f"Empty audio track in {audio_path}")
 
-    # Record clipping statistics BEFORE normalization
+    # Record clipping statistics BEFORE normalization (Section 6)
     peak_amp = float(np.max(np.abs(waveform)))
     clipping_threshold = 0.99  # Samples near ±1.0
     n_clipped = int(np.sum(np.abs(waveform) >= clipping_threshold))
@@ -262,17 +263,19 @@ def decode_audio_window(
 
     waveform = full.waveform[start_sample:end_sample]
 
+    # Record clipping statistics for this window BEFORE padding and normalization (Section 6)
+    clipping_threshold = 0.99
+    peak_amp = float(np.max(np.abs(waveform))) if len(waveform) > 0 else 0.0
+    n_clipped = int(np.sum(np.abs(waveform) >= clipping_threshold))
+    clipped_ratio = n_clipped / len(waveform) if len(waveform) > 0 else 0.0
+
     # Pad with zeros if the window extends beyond the audio
     expected_samples = int(round(window_duration_s * target_sr))
     if len(waveform) < expected_samples:
         pad = np.zeros(expected_samples - len(waveform), dtype=np.float32)
         waveform = np.concatenate([waveform, pad])
 
-    # Compute clipping stats for this window
-    peak_amp = float(np.max(np.abs(waveform))) if len(waveform) > 0 else 0.0
-    n_clipped = int(np.sum(np.abs(waveform) >= 0.99))
-    clipped_ratio = n_clipped / len(waveform) if len(waveform) > 0 else 0.0
-
+    # Peak normalize only after recording clipping statistics (Section 6)
     was_normalized = False
     if peak_normalize and peak_amp > 0:
         waveform = waveform / peak_amp

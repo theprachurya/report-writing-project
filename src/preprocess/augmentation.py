@@ -54,6 +54,8 @@ class VideoAugmentor:
         Probability of JPEG re-encoding to simulate compression artifacts.
     noise_prob:
         Probability of adding Gaussian noise.
+    brightness_prob:
+        Probability of adjusting brightness.
     """
 
     def __init__(
@@ -63,6 +65,7 @@ class VideoAugmentor:
         frame_drop_prob: float = 0.1,
         reencode_prob: float = 0.0,
         noise_prob: float = 0.2,
+        brightness_prob: float = 0.0,
         rng: np.random.Generator | None = None,
     ) -> None:
         self.resize_prob = resize_prob
@@ -70,6 +73,7 @@ class VideoAugmentor:
         self.frame_drop_prob = frame_drop_prob
         self.reencode_prob = reencode_prob
         self.noise_prob = noise_prob
+        self.brightness_prob = brightness_prob
         self._rng = rng or np.random.default_rng()
 
     def __call__(
@@ -115,8 +119,13 @@ class VideoAugmentor:
         if roll < cumulative:
             return self._apply_noise(frames)
 
+        # Brightness adjustment
+        cumulative += self.brightness_prob
+        if roll < cumulative:
+            return self._apply_brightness(frames)
+
         # No augmentation
-        return frames.copy(), AugmentationRecord("none", "identity", {})
+        return np.clip(frames, 0, 255).astype(np.uint8), AugmentationRecord("none", "identity", {})
 
     def _apply_resize(
         self, frames: np.ndarray,
@@ -196,6 +205,16 @@ class VideoAugmentor:
                 result[index] = frame
         return result, AugmentationRecord("video", "jpeg_reencode", {"quality": quality})
 
+    def _apply_brightness(
+        self, frames: np.ndarray,
+    ) -> tuple[np.ndarray, AugmentationRecord]:
+        """Adjust brightness/contrast and clamp to valid uint8 range."""
+        factor = float(self._rng.uniform(0.7, 1.3))
+        result = np.clip(frames.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+        return result, AugmentationRecord(
+            "video", "brightness", {"factor": factor}
+        )
+
 
 class AudioAugmentor:
     """Applies audio-specific degradations to waveforms.
@@ -267,21 +286,21 @@ class AudioAugmentor:
         if roll < cumulative:
             return self._apply_reverb(waveform, sample_rate)
 
-        return waveform.copy(), AugmentationRecord("none", "identity", {})
+        return np.clip(waveform, -1.0, 1.0).astype(np.float32), AugmentationRecord("none", "identity", {})
 
     def _apply_awgn(
         self, waveform: np.ndarray,
     ) -> tuple[np.ndarray, AugmentationRecord]:
-        """Add additive white Gaussian noise at a random SNR."""
+        """Add additive white Gaussian noise at a random SNR and clamp to [-1.0, 1.0]."""
         snr_db = float(self._rng.uniform(0, 20))
         signal_power = float(np.mean(waveform ** 2))
         if signal_power < 1e-10:
-            return waveform.copy(), AugmentationRecord(
+            return np.clip(waveform, -1.0, 1.0).astype(np.float32), AugmentationRecord(
                 "audio", "awgn", {"snr_db": snr_db, "skipped": True}
             )
         noise_power = signal_power / (10 ** (snr_db / 10))
         noise = self._rng.normal(0, np.sqrt(noise_power), size=waveform.shape).astype(np.float32)
-        result = waveform + noise
+        result = np.clip(waveform + noise, -1.0, 1.0).astype(np.float32)
 
         return result, AugmentationRecord(
             "audio", "awgn", {"snr_db": snr_db}
@@ -290,7 +309,7 @@ class AudioAugmentor:
     def _apply_lowpass(
         self, waveform: np.ndarray, sample_rate: int,
     ) -> tuple[np.ndarray, AugmentationRecord]:
-        """Apply a simple low-pass filter."""
+        """Apply a simple low-pass filter and clamp to [-1.0, 1.0]."""
         cutoff_hz = float(self._rng.uniform(1000, 4000))
         try:
             from scipy.signal import butter, sosfilt
@@ -304,6 +323,7 @@ class AudioAugmentor:
             kernel = np.ones(kernel_size, dtype=np.float32) / kernel_size
             result = np.convolve(waveform, kernel, mode="same").astype(np.float32)
 
+        result = np.clip(result, -1.0, 1.0).astype(np.float32)
         return result, AugmentationRecord(
             "audio", "lowpass", {"cutoff_hz": cutoff_hz}
         )
@@ -324,6 +344,7 @@ class AudioAugmentor:
             result[start:end] = 0.0
             dropped_ranges.append((start, end))
 
+        result = np.clip(result, -1.0, 1.0).astype(np.float32)
         return result, AugmentationRecord(
             "audio", "packet_dropout",
             {"n_segments": n_segments, "segment_ms": segment_ms},
@@ -332,23 +353,112 @@ class AudioAugmentor:
     def _apply_reverb(
         self, waveform: np.ndarray, sample_rate: int,
     ) -> tuple[np.ndarray, AugmentationRecord]:
-        """Add simple synthetic reverberation using a comb filter."""
+        """Add synthetic reverberation using a vectorized comb filter."""
         delay_ms = float(self._rng.uniform(10, 50))
         decay = float(self._rng.uniform(0.2, 0.6))
         delay_samples = int(delay_ms * sample_rate / 1000)
 
-        result = waveform.copy()
-        for i in range(delay_samples, len(result)):
-            result[i] += decay * result[i - delay_samples]
+        if delay_samples <= 0 or delay_samples >= len(waveform):
+            return np.clip(waveform, -1.0, 1.0).astype(np.float32), AugmentationRecord(
+                "audio", "reverb", {"delay_ms": delay_ms, "decay": decay, "skipped": True}
+            )
 
-        # Normalize to prevent clipping
-        peak = np.max(np.abs(result))
+        try:
+            from scipy.signal import lfilter
+            # Vectorized IIR comb filter: y[n] = x[n] + decay * y[n - delay_samples]
+            # Transfer function H(z) = 1 / (1 - decay * z^{-delay_samples})
+            b = np.array([1.0], dtype=np.float32)
+            a = np.zeros(delay_samples + 1, dtype=np.float32)
+            a[0] = 1.0
+            a[-1] = -decay
+            result = lfilter(b, a, waveform).astype(np.float32)
+        except ImportError:
+            # Fallback loop
+            result = waveform.copy()
+            for i in range(delay_samples, len(result)):
+                result[i] += decay * result[i - delay_samples]
+
+        # Normalize to prevent clipping, then clamp to [-1.0, 1.0]
+        peak = float(np.max(np.abs(result))) if len(result) > 0 else 0.0
         if peak > 1.0:
             result = result / peak
+        result = np.clip(result, -1.0, 1.0).astype(np.float32)
 
-        return result.astype(np.float32), AugmentationRecord(
+        return result, AugmentationRecord(
             "audio", "reverb", {"delay_ms": delay_ms, "decay": decay}
         )
+
+
+class AudioVisualAugmentor:
+    """Coordinates modality-specific augmentations per Section 6.
+
+    Enforces that at most one modality (video or audio) is degraded at a time,
+    unless joint degradation is explicitly enabled with `joint_prob > 0.0`.
+
+    Parameters
+    ----------
+    video_augmentor:
+        Configured VideoAugmentor instance.
+    audio_augmentor:
+        Configured AudioAugmentor instance.
+    joint_prob:
+        Probability of applying joint video+audio degradation (default 0.0).
+    rng:
+        Random number generator.
+    """
+
+    def __init__(
+        self,
+        video_augmentor: VideoAugmentor | None = None,
+        audio_augmentor: AudioAugmentor | None = None,
+        joint_prob: float = 0.0,
+        rng: np.random.Generator | None = None,
+    ) -> None:
+        self.video_augmentor = video_augmentor
+        self.audio_augmentor = audio_augmentor
+        self.joint_prob = float(joint_prob)
+        self._rng = rng or np.random.default_rng()
+
+    def __call__(
+        self,
+        frames: np.ndarray | None = None,
+        waveform: np.ndarray | None = None,
+        sample_rate: int = 16_000,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, list[AugmentationRecord]]:
+        """Apply augmentation enforcing the one-modality-at-a-time contract."""
+        records: list[AugmentationRecord] = []
+        can_video = frames is not None and self.video_augmentor is not None
+        can_audio = waveform is not None and self.audio_augmentor is not None
+
+        if not can_video and not can_audio:
+            return frames, waveform, records
+
+        roll = float(self._rng.random())
+        is_joint = (roll < self.joint_prob) if (can_video and can_audio and self.joint_prob > 0.0) else False
+
+        if is_joint:
+            # Joint degradation for later stages (Section 6)
+            aug_frames, v_rec = self.video_augmentor(frames)  # type: ignore[misc]
+            aug_wave, a_rec = self.audio_augmentor(waveform, sample_rate=sample_rate)  # type: ignore[misc]
+            records.extend([v_rec, a_rec])
+            return aug_frames, aug_wave, records
+
+        # Strictly one modality at a time
+        candidates = []
+        if can_video:
+            candidates.append("video")
+        if can_audio:
+            candidates.append("audio")
+
+        chosen = self._rng.choice(candidates)
+        if chosen == "video":
+            aug_frames, v_rec = self.video_augmentor(frames)  # type: ignore[misc]
+            records.append(v_rec)
+            return aug_frames, waveform, records
+        else:
+            aug_wave, a_rec = self.audio_augmentor(waveform, sample_rate=sample_rate)  # type: ignore[misc]
+            records.append(a_rec)
+            return frames, aug_wave, records
 
 
 def apply_modality_dropout(

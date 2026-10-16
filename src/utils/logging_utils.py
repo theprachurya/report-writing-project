@@ -7,6 +7,7 @@ See AGENTS.md for build order.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import shutil
@@ -161,6 +162,9 @@ class TensorBoardBackend(LoggingBackend):
     def log_artifact(self, local_path: str | Path) -> None:
         """Copy artifact to the TensorBoard log directory for preservation."""
         src = Path(local_path)
+        if not src.exists():
+            logger.warning("Artifact not found, skipping copy: %s", src)
+            return
         dst = self._log_dir / "artifacts" / src.name
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -239,42 +243,60 @@ class ExperimentLogger:
     def log_params(self, params: dict[str, Any]) -> None:
         """Log hyperparameters / configuration to all backends."""
         for b in self._backends:
-            b.log_params(params)
+            try:
+                b.log_params(params)
+            except Exception as exc:
+                logger.warning("Backend %s failed to log_params: %s", b, exc)
         logger.debug("Logged %d params", len(_flatten_dict(params)))
 
     def log_metric(self, key: str, value: float, step: int | None = None) -> None:
         """Log a single scalar metric to all backends."""
         for b in self._backends:
-            b.log_metric(key, value, step=step)
+            try:
+                b.log_metric(key, value, step=step)
+            except Exception as exc:
+                logger.warning("Backend %s failed to log_metric: %s", b, exc)
 
     def log_metrics(
         self, metrics: dict[str, float], step: int | None = None
     ) -> None:
         """Log a dict of scalar metrics to all backends."""
         for b in self._backends:
-            b.log_metrics(metrics, step=step)
+            try:
+                b.log_metrics(metrics, step=step)
+            except Exception as exc:
+                logger.warning("Backend %s failed to log_metrics: %s", b, exc)
         logger.info("Step %s metrics: %s", step, metrics)
 
     def log_artifact(self, local_path: str | Path) -> None:
         """Log a file artifact to all backends."""
         for b in self._backends:
-            b.log_artifact(local_path)
+            try:
+                b.log_artifact(local_path)
+            except Exception as exc:
+                logger.warning("Backend %s failed to log_artifact: %s", b, exc)
 
     def set_tag(self, key: str, value: str) -> None:
         """Set a tag/metadata entry on all backends."""
         for b in self._backends:
-            b.set_tag(key, value)
+            try:
+                b.set_tag(key, value)
+            except Exception as exc:
+                logger.warning("Backend %s failed to set_tag: %s", b, exc)
 
     def finish(self) -> None:
         """Finalize all backends."""
         for b in self._backends:
-            b.finish()
+            try:
+                b.finish()
+            except Exception as exc:
+                logger.warning("Backend %s failed to finish: %s", b, exc)
 
 
 # ── Config saving (reproducibility checklist) ────────────────────────────────
 
 def save_config_with_checkpoint(
-    config: dict[str, Any],
+    config: dict[str, Any] | Any,
     checkpoint_dir: str | Path,
     config_name: str = "config.yaml",
 ) -> Path:
@@ -286,7 +308,7 @@ def save_config_with_checkpoint(
     Parameters
     ----------
     config:
-        The full merged config dict to persist.
+        The full merged config dict or dataclass instance to persist.
     checkpoint_dir:
         Directory where the checkpoint is saved.
     config_name:
@@ -297,11 +319,18 @@ def save_config_with_checkpoint(
     Path
         Path to the saved config file.
     """
+    if dataclasses.is_dataclass(config):
+        cfg_dict = dataclasses.asdict(config)
+    elif isinstance(config, dict):
+        cfg_dict = config
+    else:
+        cfg_dict = dict(config)
+
     out_dir = Path(checkpoint_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / config_name
     with open(out_path, "w", encoding="utf-8") as fh:
-        yaml.dump(config, fh, default_flow_style=False, sort_keys=False)
+        yaml.dump(cfg_dict, fh, default_flow_style=False, sort_keys=False)
     logger.info("Config saved to %s", out_path)
     return out_path
 
@@ -324,9 +353,9 @@ def setup_logging(
     """
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if log_file is not None:
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(str(log_path), encoding="utf-8"))
+        log_file = Path(log_file)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(str(log_file), encoding="utf-8"))
 
     logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
     logger.info("Logging configured: level=%s, file=%s", level, log_file)

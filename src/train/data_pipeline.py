@@ -75,11 +75,13 @@ def build_train_val_loaders(
     if not isinstance(balance_cfg, dict):
         balance_cfg = vars(balance_cfg)
     if balance_cfg.get("balanced_sampling", False):
-        labels = train_set.rows["clip_fake"].astype(int).to_numpy()
-        class_counts = torch.bincount(torch.as_tensor(labels), minlength=2).clamp_min(1)
-        weights = (1.0 / class_counts[torch.as_tensor(labels)]).double()
+        labels = train_set.rows["clip_fake"].astype(int).to_numpy().copy()
+        labels_tensor = torch.as_tensor(labels)
+        class_counts = torch.bincount(labels_tensor, minlength=2).clamp_min(1)
+        weights = (1.0 / class_counts[labels_tensor]).double()
+        num_samples = int(balance_cfg.get("samples_per_epoch") or len(weights))
         sampler = WeightedRandomSampler(
-            weights, num_samples=len(weights), replacement=True, generator=generator
+            weights, num_samples=num_samples, replacement=True, generator=generator
         )
         shuffle = False
 

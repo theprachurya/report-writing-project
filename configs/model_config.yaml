@@ -52,6 +52,7 @@ reliability_estimator:
   hidden_dim: 128
   dropout: 0.1
   gate_temperature: 1.0                # T_g for softmax(g / T_g); [Proposed]
+  T_g: 1.0                             # Temperature T_g for softmax(g / T_g); [Proposed]
   # Output: w_v, w_a via softmax; w_v + w_a = 1
 
 # ── Fusion classifier (Section 7.1) ──────────────────────────────────────────

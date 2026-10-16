@@ -42,10 +42,18 @@ class EfficiencyProfile:
         95th percentile latency in ms.
     throughput_windows_per_s:
         Windows processed per second.
+    preprocessing_latency_p50_ms:
+        Median per-window preprocessing latency in ms.
+    preprocessing_latency_p95_ms:
+        95th percentile preprocessing latency in ms.
+    end_to_end_latency_p50_ms:
+        Median end-to-end latency (preprocessing + inference) in ms.
+    end_to_end_latency_p95_ms:
+        95th percentile end-to-end latency in ms.
     hardware_name:
         Name of the hardware tested on.
     includes_preprocessing:
-        Whether preprocessing time is included.
+        Whether preprocessing time is included / measured.
     """
     total_params: int = 0
     trainable_params: int = 0
@@ -55,12 +63,16 @@ class EfficiencyProfile:
     latency_p50_ms: float = 0.0
     latency_p95_ms: float = 0.0
     throughput_windows_per_s: float = 0.0
+    preprocessing_latency_p50_ms: float = 0.0
+    preprocessing_latency_p95_ms: float = 0.0
+    end_to_end_latency_p50_ms: float = 0.0
+    end_to_end_latency_p95_ms: float = 0.0
     hardware_name: str = "unknown"
     includes_preprocessing: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for logging."""
-        return {
+        d: dict[str, Any] = {
             "total_params": self.total_params,
             "total_params_M": self.total_params_m,
             "trainable_params": self.trainable_params,
@@ -70,7 +82,14 @@ class EfficiencyProfile:
             "latency_p95_ms": self.latency_p95_ms,
             "throughput_windows/s": self.throughput_windows_per_s,
             "hardware": self.hardware_name,
+            "includes_preprocessing": self.includes_preprocessing,
         }
+        if self.includes_preprocessing or self.preprocessing_latency_p50_ms > 0:
+            d["preprocessing_latency_p50_ms"] = self.preprocessing_latency_p50_ms
+            d["preprocessing_latency_p95_ms"] = self.preprocessing_latency_p95_ms
+            d["end_to_end_latency_p50_ms"] = self.end_to_end_latency_p50_ms
+            d["end_to_end_latency_p95_ms"] = self.end_to_end_latency_p95_ms
+        return d
 
 
 def count_parameters(model: nn.Module) -> tuple[int, int]:
@@ -185,11 +204,53 @@ def measure_latency(
             end = time.perf_counter()
             latencies.append((end - start) * 1000)  # ms
 
-    p50 = float(np.percentile(latencies, 50))
-    p95 = float(np.percentile(latencies, 95))
-    throughput = 1000.0 / np.mean(latencies)  # windows/s
+    # Report p50 and p95 latency percentiles per Section 9.3
+    percentiles = np.percentile(latencies, [50, 95])
+    p50 = float(percentiles[0])
+    p95 = float(percentiles[1])
+    throughput = 1000.0 / np.mean(latencies) if len(latencies) > 0 and np.mean(latencies) > 0 else 0.0
 
     return p50, p95, throughput
+
+
+def measure_preprocessing_latency(
+    preprocess_fn: Any,
+    sample_raw_input: Any,
+    n_warmup: int = 5,
+    n_measure: int = 50,
+) -> tuple[float, float]:
+    """Measure per-window preprocessing latency separately.
+
+    Parameters
+    ----------
+    preprocess_fn:
+        Preprocessing function that transforms raw input to model input.
+    sample_raw_input:
+        Example raw input clip/data.
+    n_warmup:
+        Warmup iterations.
+    n_measure:
+        Measurement iterations.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(p50_ms, p95_ms)``.
+    """
+    import numpy as np
+
+    for _ in range(n_warmup):
+        preprocess_fn(sample_raw_input)
+
+    latencies: list[float] = []
+    for _ in range(n_measure):
+        start = time.perf_counter()
+        preprocess_fn(sample_raw_input)
+        end = time.perf_counter()
+        latencies.append((end - start) * 1000.0)
+
+    percentiles = np.percentile(latencies, [50, 95])
+    return float(percentiles[0]), float(percentiles[1])
 
 
 def profile_model(
@@ -198,6 +259,8 @@ def profile_model(
     device: str = "cpu",
     hardware_name: str | None = None,
     n_measure: int = 100,
+    preprocess_fn: Any | None = None,
+    sample_raw_input: Any | None = None,
 ) -> EfficiencyProfile:
     """Run full efficiency profiling on a model.
 
@@ -213,6 +276,10 @@ def profile_model(
         Human-readable hardware name.
     n_measure:
         Number of latency measurement iterations.
+    preprocess_fn:
+        Optional preprocessing function to benchmark preprocessing separately.
+    sample_raw_input:
+        Raw input for preprocessing latency benchmark.
 
     Returns
     -------
@@ -230,7 +297,7 @@ def profile_model(
         hardware_name=hardware_name or device,
     )
 
-    # GPU memory profiling
+    # Peak GPU memory profiling via torch.cuda.max_memory_allocated()
     if device != "cpu" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         model = model.to(device)
@@ -241,9 +308,18 @@ def profile_model(
                     for k, v in sample_input.items()
                 }
                 model(**device_input)
-            profile.peak_gpu_memory_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+            profile.peak_gpu_memory_mb = float(torch.cuda.max_memory_allocated() / (1024 * 1024))
 
-    # Latency profiling
+    # Preprocessing latency profiling
+    if preprocess_fn is not None and sample_raw_input is not None:
+        prep_p50, prep_p95 = measure_preprocessing_latency(
+            preprocess_fn, sample_raw_input, n_measure=min(n_measure, 50)
+        )
+        profile.preprocessing_latency_p50_ms = prep_p50
+        profile.preprocessing_latency_p95_ms = prep_p95
+        profile.includes_preprocessing = True
+
+    # Inference latency profiling
     if sample_input is not None:
         p50, p95, throughput = measure_latency(
             model, sample_input, n_measure=n_measure, device=device
@@ -252,10 +328,15 @@ def profile_model(
         profile.latency_p95_ms = p95
         profile.throughput_windows_per_s = throughput
 
+        if profile.includes_preprocessing:
+            profile.end_to_end_latency_p50_ms = profile.preprocessing_latency_p50_ms + p50
+            profile.end_to_end_latency_p95_ms = profile.preprocessing_latency_p95_ms + p95
+
     logger.info(
-        "Efficiency: %.2fM params, %.1fMB checkpoint, p50=%.1fms, p95=%.1fms",
+        "Efficiency: %.2fM params, %.1fMB checkpoint, peak GPU=%.1fMB, p50=%.1fms, p95=%.1fms",
         profile.total_params_m,
         profile.checkpoint_size_mb,
+        profile.peak_gpu_memory_mb,
         profile.latency_p50_ms,
         profile.latency_p95_ms,
     )

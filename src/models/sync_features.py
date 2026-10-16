@@ -131,18 +131,21 @@ class SyncFeatureExtractor(nn.Module):
         # max_δ s_δ
         max_s, max_idx = sims.max(dim=-1)  # (B,)
 
-        # best_offset: normalized to [-1, 1]
-        max_offset = max(abs(o) for o in self.offsets) or 1
-        best_offset = torch.tensor(
-            [self.offsets[i] for i in max_idx.tolist()],
-            device=device,
-            dtype=torch.float32,
-        ) / max_offset  # (B,)
+        # best_offset: discrete argmax mapped to offset value, normalized to [-1, 1].
+        # NOTE ON DIFFERENTIABILITY:
+        # best_offset is inherently non-differentiable due to the discrete argmax
+        # lookup. Gradients do not flow through best_offset back to encoder or
+        # projector parameters; it serves as an auxiliary, discrete forensic feature
+        # for downstream modules (reliability estimator and classifier) per Section 7.1/7.3.
+        max_offset = float(max(abs(o) for o in self.offsets) or 1)
+        offsets_tensor = torch.tensor(self.offsets, device=device, dtype=torch.float32)
+        best_offset = offsets_tensor[max_idx] / max_offset  # (B,)
 
-        # dispersion: std of similarities across offsets
-        dispersion = sims.std(dim=-1)  # (B,)
+        # dispersion: standard deviation of similarities across offsets
+        # per PROJECT_BRIEF Section 7.1: dispersion = torch.std(sims, dim=-1)
+        dispersion = torch.std(sims, dim=-1)  # (B,)
 
-        # Stack into output features
+        # Stack into output features: [s_0, max_s, best_offset, dispersion]
         sync_features = torch.stack(
             [s_0, max_s, best_offset, dispersion], dim=-1
         )  # (B, 4)

@@ -28,7 +28,7 @@ class VideoDecodeResult:
     Attributes
     ----------
     frames:
-        Array of shape ``(N, H, W, 3)`` in RGB uint8.
+        Array of shape ``(N, H, W, 3)`` in RGB uint8 (or ``(N, 3, H, W)`` if TCHW requested).
     fps:
         The native fps of the source video.
     target_fps:
@@ -47,10 +47,28 @@ class VideoDecodeResult:
     timestamps_s: np.ndarray                          # (N,) float64
     dropped_frame_indices: list[int] = field(default_factory=list)
 
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Return frame array shape."""
+        return self.frames.shape
+
+    def to_tchw(self) -> np.ndarray:
+        """Convert frames to (T, C, H, W) layout."""
+        if self.frames.ndim == 4 and self.frames.shape[-1] in (1, 3):
+            return np.transpose(self.frames, (0, 3, 1, 2))
+        return self.frames
+
+    def to_thwc(self) -> np.ndarray:
+        """Convert frames to (T, H, W, C) layout."""
+        if self.frames.ndim == 4 and self.frames.shape[1] in (1, 3) and self.frames.shape[-1] not in (1, 3):
+            return np.transpose(self.frames, (0, 2, 3, 1))
+        return self.frames
+
 
 def decode_video(
     video_path: str | Path,
     target_fps: int = 25,
+    layout: str = "THWC",
 ) -> VideoDecodeResult:
     """Decode a video file at a fixed target FPS.
 
@@ -63,6 +81,8 @@ def decode_video(
         Path to the video file (supports container files or .npz fixtures).
     target_fps:
         Desired output frame rate.  Per Section 6, default is 25.
+    layout:
+        Output frame layout: ``"THWC"`` (default) or ``"TCHW"``.
 
     Returns
     -------
@@ -84,6 +104,14 @@ def decode_video(
     if video_path.suffix.lower() == ".npz":
         data = np.load(str(video_path))
         raw_frames = data["frames"]
+        # Ensure clean shape handling (TCHW vs THWC)
+        if raw_frames.ndim == 4 and raw_frames.shape[1] in (1, 3) and raw_frames.shape[-1] not in (1, 3):
+            raw_frames = np.transpose(raw_frames, (0, 2, 3, 1))
+        elif raw_frames.ndim == 3:
+            raw_frames = np.repeat(raw_frames[..., np.newaxis], 3, axis=-1)
+        if raw_frames.shape[-1] == 1:
+            raw_frames = np.repeat(raw_frames, 3, axis=-1)
+
         native_fps = float(data["fps"]) if "fps" in data else 25.0
         total_native = len(raw_frames)
         duration_s = total_native / native_fps
@@ -91,7 +119,8 @@ def decode_video(
         sample_indices = np.round(np.linspace(0, total_native - 1, n_output)).astype(int)
         sampled_frames = raw_frames[sample_indices]
         timestamps = sample_indices / native_fps
-        return VideoDecodeResult(
+
+        res = VideoDecodeResult(
             frames=sampled_frames,
             fps=native_fps,
             target_fps=target_fps,
@@ -99,6 +128,9 @@ def decode_video(
             timestamps_s=timestamps,
             dropped_frame_indices=[],
         )
+        if layout.upper() == "TCHW":
+            res.frames = res.to_tchw()
+        return res
 
     if cv2 is None:
         raise RuntimeError(
@@ -135,16 +167,37 @@ def decode_video(
 
     current_native_idx = 0
     for out_idx, target_native in enumerate(sample_indices):
-        # Seek if needed (sequential reads are faster for small skips)
+        # Seek safely if needed (sequential reads are faster for small skips)
         if target_native != current_native_idx:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, target_native)
-            current_native_idx = target_native
+            seek_ok = cap.set(cv2.CAP_PROP_POS_FRAMES, float(target_native))
+            actual_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+            if not seek_ok or actual_pos != target_native:
+                logger.warning(
+                    "Seek mismatch in %s: requested native frame %d, pos reported %d (seek_ok=%s)",
+                    video_path.name,
+                    target_native,
+                    actual_pos,
+                    seek_ok,
+                )
+            if 0 <= actual_pos < target_native:
+                while actual_pos < target_native:
+                    adv_ret, _ = cap.read()
+                    if not adv_ret:
+                        break
+                    actual_pos += 1
+            current_native_idx = actual_pos if actual_pos >= 0 else target_native
 
         ret, frame = cap.read()
         current_native_idx += 1
 
-        if ret and frame is not None:
-            # BGR → RGB
+        if ret and frame is not None and frame.size > 0:
+            if frame.shape[0] != height or frame.shape[1] != width:
+                logger.warning(
+                    "Frame dimension mismatch in %s at frame %d: expected (%d, %d), got (%d, %d)",
+                    video_path.name, out_idx, height, width, frame.shape[0], frame.shape[1]
+                )
+                frame = cv2.resize(frame, (width, height))
+            # BGR → RGB (THWC)
             frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         else:
             # Failed read — insert a black frame and record the drop
@@ -164,6 +217,9 @@ def decode_video(
         dropped_frame_indices=dropped,
     )
 
+    if layout.upper() == "TCHW":
+        result.frames = result.to_tchw()
+
     if dropped:
         logger.warning(
             "Dropped %d/%d frames in %s", len(dropped), n_output, video_path.name
@@ -178,6 +234,7 @@ def decode_video_window(
     window_duration_s: float = 2.0,
     frames_per_window: int = 16,
     target_fps: int = 25,
+    layout: str = "THWC",
 ) -> VideoDecodeResult:
     """Decode a 2-second window of *frames_per_window* uniformly spaced frames.
 
@@ -196,6 +253,8 @@ def decode_video_window(
         Number of frames to extract per window (default 16).
     target_fps:
         Base decode frame rate (default 25).
+    layout:
+        Output frame layout: ``"THWC"`` (default) or ``"TCHW"``.
 
     Returns
     -------
@@ -208,9 +267,9 @@ def decode_video_window(
     if start_s < 0 or window_duration_s <= 0 or frames_per_window <= 0:
         raise ValueError("start_s must be non-negative and window/frame counts must be positive")
 
-    # Decode/resample the source at the configured fixed FPS first, then sample
+    # Decode/resample the source at the configured fixed FPS first (in THWC), then sample
     # the requested window. This keeps container and fixture behavior aligned.
-    full_res = decode_video(video_path, target_fps=target_fps)
+    full_res = decode_video(video_path, target_fps=target_fps, layout="THWC")
     if len(full_res.frames) == 0:
         raise RuntimeError(f"No frames decoded from {video_path}")
     frame_height, frame_width = full_res.frames.shape[1:3]
@@ -240,7 +299,7 @@ def decode_video_window(
             continue
         frames[out_idx] = full_res.frames[source_idx]
 
-    return VideoDecodeResult(
+    result = VideoDecodeResult(
         frames=frames,
         fps=full_res.fps,
         target_fps=target_fps,
@@ -248,3 +307,6 @@ def decode_video_window(
         timestamps_s=timestamps,
         dropped_frame_indices=dropped,
     )
+    if layout.upper() == "TCHW":
+        result.frames = result.to_tchw()
+    return result

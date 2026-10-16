@@ -117,7 +117,7 @@ class DegradationSuiteRunner:
             self.missing_cfg = {}
 
     def get_degradation_conditions(self) -> list[dict[str, Any]]:
-        """Generate all degradation conditions to evaluate.
+        """Generate all degradation conditions to evaluate per Section 9.2.
 
         Returns
         -------
@@ -142,6 +142,19 @@ class DegradationSuiteRunner:
                 "type": "video", "name": f"blur_sigma_{sigma}",
                 "params": {"sigma": sigma},
             })
+        # Frame drop per Section 9.2 (frame_drop_rates: [0.1, 0.2, 0.3])
+        frame_drop_rates = (
+            self.video_cfg.get("frame_drop_rates")
+            or self.video_cfg.get("frame_drop_rate")
+            or [0.1, 0.2, 0.3]
+        )
+        if isinstance(frame_drop_rates, (int, float)):
+            frame_drop_rates = [frame_drop_rates]
+        for rate in frame_drop_rates:
+            conditions.append({
+                "type": "video", "name": f"frame_drop_{rate}",
+                "params": {"frame_drop_rate": rate},
+            })
 
         # Audio degradations
         for snr in self.audio_cfg.get("awgn_snr_db", [20, 10, 0]):
@@ -153,6 +166,35 @@ class DegradationSuiteRunner:
             conditions.append({
                 "type": "audio", "name": f"lowpass_{cutoff}Hz",
                 "params": {"cutoff_hz": cutoff},
+            })
+        # Packet dropout / segment dropout per Section 9.2
+        dropout_rates = (
+            self.audio_cfg.get("dropout_rates")
+            or self.audio_cfg.get("dropout_rate")
+            or [0.05, 0.10, 0.20]
+        )
+        if isinstance(dropout_rates, (int, float)):
+            dropout_rates = [dropout_rates]
+        for rate in dropout_rates:
+            conditions.append({
+                "type": "audio", "name": f"packet_dropout_{rate}",
+                "params": {"dropout_rate": rate},
+            })
+        # Codec re-sampling per Section 9.2
+        resample_rates = self.audio_cfg.get("resample_rates", [8000, 16000, 22050])
+        if isinstance(resample_rates, (int, float)):
+            resample_rates = [resample_rates]
+        for sr in resample_rates:
+            conditions.append({
+                "type": "audio", "name": f"codec_resample_{sr}Hz",
+                "params": {"sample_rate": sr},
+            })
+
+        # Joint degradation
+        if self.joint_enabled:
+            conditions.append({
+                "type": "joint", "name": "joint_blur_and_noise",
+                "params": {"blur_sigma": 2.0, "snr_db": 10},
             })
 
         # Missing modality
@@ -196,7 +238,11 @@ class DegradationSuiteRunner:
         metric, mean_w_v, mean_w_a = evaluate_fn(condition)
 
         change = metric - clean_metric
-        rel_change = (change / clean_metric * 100) if clean_metric != 0 else 0
+        # Safe division guard in relative_change
+        if clean_metric is None or np.isnan(clean_metric) or abs(clean_metric) < 1e-12:
+            rel_change = 0.0
+        else:
+            rel_change = float(change / clean_metric * 100.0)
 
         return DegradationResult(
             degradation_type=condition["type"],
@@ -210,3 +256,48 @@ class DegradationSuiteRunner:
             mean_w_a=mean_w_a,
             gate_shift=mean_w_v - clean_w_v,
         )
+
+    def run_all(
+        self,
+        evaluate_fn: Callable,
+        clean_metric: float,
+        clean_w_v: float = 0.5,
+        conditions: list[dict[str, Any]] | None = None,
+    ) -> DegradationSuiteResults:
+        """Run all degradation conditions and collect aggregate results.
+
+        Parameters
+        ----------
+        evaluate_fn:
+            Function that accepts condition params and returns
+            ``(metric, mean_w_v, mean_w_a)``.
+        clean_metric:
+            Metric value on clean data for comparison.
+        clean_w_v:
+            Clean visual gate weight for shift calculation.
+        conditions:
+            Optional list of conditions to run. If None, uses get_degradation_conditions().
+
+        Returns
+        -------
+        DegradationSuiteResults
+            Aggregate results from the full degradation battery.
+        """
+        if conditions is None:
+            conditions = self.get_degradation_conditions()
+
+        results = [
+            self.run_condition(cond, evaluate_fn, clean_metric, clean_w_v)
+            for cond in conditions
+        ]
+
+        summary = {
+            "n_conditions": len(results),
+            "mean_change": float(np.mean([r.metric_change for r in results])) if results else 0.0,
+            "mean_rel_change": float(np.mean([r.relative_change for r in results])) if results else 0.0,
+        }
+        return DegradationSuiteResults(results=results, summary=summary)
+
+
+# Alias for canonical naming
+DegradationSuite = DegradationSuiteRunner

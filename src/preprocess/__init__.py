@@ -15,12 +15,14 @@ from src.preprocess.audio_features import MelSpectrogramResult, compute_log_mel_
 try:
     from src.preprocess.augmentation import (
         AudioAugmentor,
+        AudioVisualAugmentor,
         AugmentationRecord,
         VideoAugmentor,
         apply_modality_dropout,
     )
 except ImportError:
     AudioAugmentor = None  # type: ignore[assignment, misc]
+    AudioVisualAugmentor = None  # type: ignore[assignment, misc]
     AugmentationRecord = None  # type: ignore[assignment, misc]
     VideoAugmentor = None  # type: ignore[assignment, misc]
     apply_modality_dropout = None  # type: ignore[assignment, misc]
@@ -30,11 +32,13 @@ try:
         FaceCropResult,
         FaceExtractor,
         WindowFaceResult,
+        extract_face_crop,
     )
 except ImportError:
     FaceCropResult = None  # type: ignore[assignment, misc]
     FaceExtractor = None  # type: ignore[assignment, misc]
     WindowFaceResult = None  # type: ignore[assignment, misc]
+    extract_face_crop = None  # type: ignore[assignment, misc]
 
 try:
     from src.preprocess.quality_features import (
@@ -53,6 +57,7 @@ __all__ = [
     "AlignmentResult",
     "AudioAugmentor",
     "AudioQualityFeatures",
+    "AudioVisualAugmentor",
     "AugmentationRecord",
     "FaceCropResult",
     "FaceExtractor",
@@ -65,4 +70,5 @@ __all__ = [
     "compute_audio_quality",
     "compute_log_mel_spectrogram",
     "compute_visual_quality",
+    "extract_face_crop",
 ]

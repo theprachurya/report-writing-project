@@ -79,13 +79,105 @@ class WindowFaceResult:
     detection_confidences: list[float] = field(default_factory=list)
 
 
-class FaceExtractor:
-    """Face detection and alignment using OpenCV's DNN-based detector.
+def extract_face_crop(
+    frame: np.ndarray,
+    bbox: tuple[int | float, int | float, int | float, int | float] | list[int] | list[float],
+    box_expansion: float = 0.20,
+    crop_size: int = 160,
+) -> tuple[np.ndarray | None, list[float], float]:
+    """Expand bounding box by *box_expansion* while maintaining square aspect ratio.
 
-    Uses a lightweight DNN face detector (Caffe model) as a portable
-    alternative to RetinaFace/MediaPipe.  The detector can be swapped via
-    configuration; this implementation provides a working baseline that does
-    not require external model downloads for testing.
+    Resizing rectangular face crops directly to 160x160 causes non-uniform stretching
+    distortion. This function expands the detected bounding box by *box_expansion*
+    (Section 6: 20%) while enforcing a strict 1:1 square aspect ratio centered on the face.
+    If the expanded square extends beyond frame boundaries, the window is shifted to stay
+    within bounds while preserving its square dimensions.
+
+    Parameters
+    ----------
+    frame:
+        RGB image of shape ``(H, W, 3)`` uint8.
+    bbox:
+        Bounding box ``[x1, y1, x2, y2]`` in original frame coordinates.
+    box_expansion:
+        Fraction to expand the detected bounding box (default 0.20 = 20%).
+    crop_size:
+        Output crop size in pixels (default 160).
+
+    Returns
+    -------
+    tuple[np.ndarray | None, list[float], float]
+        (crop, expanded_bbox, face_area):
+        - crop: RGB uint8 array of shape ``(crop_size, crop_size, 3)`` or None if invalid.
+        - expanded_bbox: ``[x1, y1, x2, y2]`` expanded square box.
+        - face_area: Area of expanded square in pixels.
+    """
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    bw = max(1.0, float(x2 - x1))
+    bh = max(1.0, float(y2 - y1))
+    cx = float(x1 + x2) / 2.0
+    cy = float(y1 + y2) / 2.0
+
+    # Expand by box_expansion while maintaining square aspect ratio
+    side = max(bw, bh) * (1.0 + box_expansion)
+    side = min(side, float(min(h, w)))
+
+    half = side / 2.0
+    nx1 = cx - half
+    ny1 = cy - half
+    nx2 = cx + half
+    ny2 = cy + half
+
+    # Shift window if out of bounds to preserve square aspect ratio
+    if nx1 < 0.0:
+        nx2 += -nx1
+        nx1 = 0.0
+    if nx2 > w:
+        nx1 -= (nx2 - w)
+        nx2 = float(w)
+        nx1 = max(0.0, nx1)
+
+    if ny1 < 0.0:
+        ny2 += -ny1
+        ny1 = 0.0
+    if ny2 > h:
+        ny1 -= (ny2 - h)
+        ny2 = float(h)
+        ny1 = max(0.0, ny1)
+
+    ix1, iy1 = int(round(nx1)), int(round(ny1))
+    ix2, iy2 = int(round(nx2)), int(round(ny2))
+    ix1, iy1 = max(0, ix1), max(0, iy1)
+    ix2, iy2 = min(w, ix2), min(h, iy2)
+
+    face_region = frame[iy1:iy2, ix1:ix2]
+    if face_region.size == 0 or face_region.shape[0] == 0 or face_region.shape[1] == 0:
+        return None, [float(ix1), float(iy1), float(ix2), float(iy2)], 0.0
+
+    crop = cv2.resize(
+        face_region, (crop_size, crop_size), interpolation=cv2.INTER_LINEAR
+    )
+    face_area = float((ix2 - ix1) * (iy2 - iy1))
+    return crop, [float(ix1), float(iy1), float(ix2), float(iy2)], face_area
+
+
+class FaceExtractor:
+    """Face detection, expansion, and crop extraction per Section 6.
+
+    Backend support and contract behavior:
+    --------------------------------------
+    - ``"retinaface"`` / ``"mediapipe"``:
+        Proposed/target production backends. When installed, these provide
+        continuous detector confidence scores in [0, 1] and facial landmarks
+        (e.g., 5-point eyes/nose/mouth corners or 468-point mesh).
+    - ``"opencv_haar"`` / ``"opencv_dnn"``:
+        Portable offline fallback using OpenCV's built-in Haar cascade
+        classifier (``haarcascade_frontalface_default.xml``). Operates without
+        requiring external model downloads or non-free weights. By contract,
+        successful detections yield ``confidence=1.0`` and ``landmarks=None``.
+    - Failed detections for any backend return ``crop=None``, ``detected=False``,
+      ``confidence=0.0``, ``bbox=[]``, ``face_area=0.0``, and ``landmarks=None``.
 
     Parameters
     ----------
@@ -96,8 +188,8 @@ class FaceExtractor:
     min_confidence:
         Minimum detector confidence to accept a detection.
     detector:
-        Detector backend name.  Currently ``"opencv_dnn"`` is the built-in
-        default.  ``"retinaface"`` and ``"mediapipe"`` are planned.
+        Detector backend name: ``"opencv_haar"``, ``"opencv_dnn"``,
+        ``"retinaface"``, or ``"mediapipe"``.
     """
 
     def __init__(
@@ -134,20 +226,27 @@ class FaceExtractor:
         else:
             raise ValueError(f"Unknown face detector: {name}")
 
+    def extract_face_crop(
+        self,
+        frame: np.ndarray,
+        bbox: tuple[int | float, int | float, int | float, int | float] | list[int] | list[float],
+    ) -> tuple[np.ndarray | None, list[float], float]:
+        """Expand bounding box maintaining square aspect ratio and crop to crop_size."""
+        return extract_face_crop(
+            frame, bbox, box_expansion=self.box_expansion, crop_size=self.crop_size
+        )
+
     def _expand_box(
         self, x1: int, y1: int, x2: int, y2: int, h: int, w: int
     ) -> tuple[int, int, int, int]:
-        """Expand a bounding box by ``self.box_expansion`` fraction, clipped to image bounds."""
-        bw = x2 - x1
-        bh = y2 - y1
-        dx = int(bw * self.box_expansion / 2)
-        dy = int(bh * self.box_expansion / 2)
-        return (
-            max(0, x1 - dx),
-            max(0, y1 - dy),
-            min(w, x2 + dx),
-            min(h, y2 + dy),
+        """Expand a bounding box by ``self.box_expansion`` fraction, maintaining square aspect ratio."""
+        _, bbox, _ = extract_face_crop(
+            np.zeros((h, w, 3), dtype=np.uint8),
+            (x1, y1, x2, y2),
+            box_expansion=self.box_expansion,
+            crop_size=self.crop_size,
         )
+        return int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
 
     def detect_and_crop(self, frame: np.ndarray) -> FaceCropResult:
         """Detect and crop the dominant face in a single RGB frame.
@@ -191,35 +290,27 @@ class FaceExtractor:
         # Convert from (x, y, w, h) to (x1, y1, x2, y2)
         x1, y1, x2, y2 = fx, fy, fx + fw, fy + fh
 
-        # Expand box by 20%
-        ex1, ey1, ex2, ey2 = self._expand_box(x1, y1, x2, y2, h, w)
-
-        # Crop and resize to crop_size × crop_size
-        face_region = frame[ey1:ey2, ex1:ex2]
-        if face_region.size == 0:
+        # Expand box by 20% while maintaining square aspect ratio
+        crop, expanded_bbox, face_area = self.extract_face_crop(frame, (x1, y1, x2, y2))
+        if crop is None:
             return FaceCropResult(
                 crop=None,
                 detected=False,
                 confidence=0.0,
-                bbox=[float(ex1), float(ey1), float(ex2), float(ey2)],
+                bbox=expanded_bbox,
                 face_area=0.0,
                 landmarks=None,
             )
 
-        crop = cv2.resize(
-            face_region, (self.crop_size, self.crop_size),
-            interpolation=cv2.INTER_LINEAR,
-        )
-
-        face_area = float((ex2 - ex1) * (ey2 - ey1))
-        # Haar cascade doesn't provide confidence; use 1.0 as placeholder
+        # Haar cascade fallback outputs discrete detections; assign 1.0 confidence.
+        # When RetinaFace or MediaPipe is installed, continuous confidence is reported.
         confidence = 1.0
 
         return FaceCropResult(
             crop=crop,
             detected=True,
             confidence=confidence,
-            bbox=[float(ex1), float(ey1), float(ex2), float(ey2)],
+            bbox=expanded_bbox,
             face_area=face_area,
             landmarks=None,
         )

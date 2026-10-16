@@ -77,8 +77,18 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         """Load one cached feature window and its label/missingness metadata."""
         row = self.rows.iloc[index]
-        cache_name = hashlib.sha256(str(row["clip_id"]).encode("utf-8")).hexdigest() + ".npz"
+        dataset_name = str(row["dataset"]).lower()
+        clip_id = str(row["clip_id"])
+        cache_key = f"{dataset_name}:{clip_id}"
+        cache_name = hashlib.sha256(cache_key.encode("utf-8")).hexdigest() + ".npz"
         cache_path = self.cache_dir / cache_name
+        # Fallback to legacy cache key if existing cache was generated with clip_id only
+        if not cache_path.is_file():
+            legacy_name = hashlib.sha256(clip_id.encode("utf-8")).hexdigest() + ".npz"
+            legacy_path = self.cache_dir / legacy_name
+            if legacy_path.is_file():
+                cache_path = legacy_path
+
         aug_cfg = self.augmentation_config
         video_cfg = aug_cfg.get("video", {}) if isinstance(aug_cfg, dict) else {}
         audio_cfg = aug_cfg.get("audio", {}) if isinstance(aug_cfg, dict) else {}
@@ -95,7 +105,6 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
         if not cache_path.is_file() or cache_needs_refresh:
             from src.preprocess.feature_cache import preprocess_manifest_row
 
-            dataset_name = str(row["dataset"]).lower()
             if dataset_name not in self.dataset_roots:
                 raise ValueError(
                     f"No existing local root configured for dataset {dataset_name!r}; "
@@ -144,8 +153,13 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
             from src.preprocess.audio_features import compute_log_mel_spectrogram
             from src.preprocess.quality_features import compute_audio_quality, compute_visual_quality
 
-            rng_seed = int(torch.randint(0, 2**31 - 1, ()).item())
+            # Incorporate DataLoader worker ID into RNG seed for decorrelated streams
+            worker_info = torch.utils.data.get_worker_info()
+            worker_id = worker_info.id if worker_info is not None else 0
+            base_seed = int(torch.randint(0, 2**31 - 1, ()).item())
+            rng_seed = (base_seed + worker_id * 10007) % (2**31 - 1)
             rng = np.random.default_rng(rng_seed)
+
             selected_modality = enabled_modalities[int(rng.integers(0, len(enabled_modalities)))]
             if selected_modality == "video":
                 frames, _ = VideoAugmentor(
@@ -154,8 +168,13 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
                     frame_drop_prob=float(video_cfg.get("frame_drop_prob", 0.0)),
                     reencode_prob=float(video_cfg.get("reencode_prob", 0.0)),
                     noise_prob=float(video_cfg.get("noise_prob", 0.0)),
+                    brightness_prob=float(video_cfg.get("brightness_prob", 0.0)),
                     rng=rng,
                 )(frames.astype(np.uint8))
+                # Re-derive face validity mask after video augmentations (e.g. frame drop / zeroing)
+                face_valid_mask = face_valid_mask & np.any(frames != 0, axis=(1, 2, 3))
+                min_valid = getattr(self.data_config.face, "min_valid_frames", 12)
+                visual_missing = float(np.sum(face_valid_mask) < min_valid)
                 crop_list = [
                     frame if is_valid else None
                     for frame, is_valid in zip(frames, face_valid_mask)
@@ -203,17 +222,18 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
         normalization = self.data_config.visual_normalization
         mean = np.asarray(normalization.mean, dtype=np.float32).reshape(1, 1, 1, 3)
         std = np.asarray(normalization.std, dtype=np.float32).reshape(1, 1, 1, 3)
-        frames = (frames / 255.0 - mean) / std
+        frames = ((frames.astype(np.float32) / 255.0) - mean) / std
+        frames = frames.astype(np.float32)
         if visual_missing >= 0.5:
             frames = np.zeros_like(frames)
         if audio_missing >= 0.5:
             mel_spec = np.zeros_like(mel_spec)
 
         return {
-            "frames": torch.from_numpy(np.ascontiguousarray(frames)).permute(0, 3, 1, 2),
-            "mel_spec": torch.from_numpy(np.ascontiguousarray(mel_spec)).unsqueeze(0),
-            "quality_v": torch.from_numpy(quality_v),
-            "quality_a": torch.from_numpy(quality_a),
+            "frames": torch.from_numpy(np.ascontiguousarray(frames, dtype=np.float32)).permute(0, 3, 1, 2),
+            "mel_spec": torch.from_numpy(np.ascontiguousarray(mel_spec, dtype=np.float32)).unsqueeze(0),
+            "quality_v": torch.from_numpy(np.asarray(quality_v, dtype=np.float32)),
+            "quality_a": torch.from_numpy(np.asarray(quality_a, dtype=np.float32)),
             "visual_missing": torch.tensor([visual_missing], dtype=torch.float32),
             "audio_missing": torch.tensor([audio_missing], dtype=torch.float32),
             "target": torch.tensor([float(row["clip_fake"])], dtype=torch.float32),

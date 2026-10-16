@@ -59,13 +59,14 @@ class VisualEncoder(nn.Module):
         )
 
         # Depthwise temporal Conv1D over T bins
-        # groups=embedding_dim makes it depthwise
+        # Dynamic groups=in_channels makes it depthwise
+        in_channels = embedding_dim
         self.temporal_conv = nn.Conv1d(
-            in_channels=embedding_dim,
+            in_channels=in_channels,
             out_channels=embedding_dim,
             kernel_size=temporal_conv_kernel,
             padding=temporal_conv_kernel // 2,
-            groups=embedding_dim,
+            groups=in_channels,
         )
         self.temporal_norm = nn.BatchNorm1d(embedding_dim)
         self.temporal_act = nn.ReLU(inplace=True)
@@ -88,7 +89,7 @@ class VisualEncoder(nn.Module):
                 out_dim = model.classifier[0].in_features  # 576
                 model.classifier = nn.Identity()
                 return model, out_dim
-            except (ImportError, Exception) as exc:
+            except ImportError as exc:
                 logger.warning("torchvision unavailable (%s); using lightweight ConvNet fallback", exc)
                 fallback = nn.Sequential(
                     nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
@@ -110,7 +111,7 @@ class VisualEncoder(nn.Module):
                 out_dim = model.classifier[1].in_features  # 1280
                 model.classifier = nn.Identity()
                 return model, out_dim
-            except (ImportError, Exception) as exc:
+            except ImportError as exc:
                 logger.warning("torchvision unavailable (%s); using lightweight ConvNet fallback", exc)
                 fallback = nn.Sequential(
                     nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),

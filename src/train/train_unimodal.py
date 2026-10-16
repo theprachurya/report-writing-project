@@ -73,21 +73,24 @@ class UnimodalVisualModel(nn.Module):
         z_v = self.encoder(frames)
         out = self.head(z_v)
         batch_size = frames.shape[0]
+        device = frames.device
+        dummy_logit_a = torch.zeros_like(out["logit"]).detach()
+        dummy_p_a = torch.full_like(out["prob"], 0.5)
         return {
             "logit_f": out["logit"],
             "p_f": out["prob"],
             "logit_v": out["logit"],
-            "logit_a": out["logit"],  # Dummy for loss compat
+            "logit_a": dummy_logit_a,  # Detached zero tensor
             "p_v": out["prob"],
-            "p_a": out["prob"],
+            "p_a": dummy_p_a,
             "w_v": torch.ones_like(out["prob"]),
             "w_a": torch.zeros_like(out["prob"]),
             "uncertainty_v": out["uncertainty"],
-            "uncertainty_a": torch.zeros_like(out["uncertainty"]),
-            "sync_features": torch.zeros(frames.shape[0], 4, device=frames.device),
-            "gate_logits": torch.zeros(frames.shape[0], 2, device=frames.device),
-            "visual_missing": kwargs.get("visual_missing", torch.zeros(batch_size, 1, device=frames.device)),
-            "audio_missing": torch.ones(batch_size, 1, device=frames.device),
+            "uncertainty_a": torch.ones_like(out["uncertainty"]),
+            "sync_features": torch.zeros(batch_size, 4, device=device),
+            "gate_logits": torch.zeros(batch_size, 2, device=device),
+            "visual_missing": kwargs.get("visual_missing", torch.zeros(batch_size, 1, device=device)),
+            "audio_missing": torch.ones(batch_size, 1, device=device),
         }
 
 
@@ -141,21 +144,24 @@ class UnimodalAudioModel(nn.Module):
         z_a = self.encoder(mel_spec)
         out = self.head(z_a)
         batch_size = mel_spec.shape[0]
+        device = mel_spec.device
+        dummy_logit_v = torch.zeros_like(out["logit"]).detach()
+        dummy_p_v = torch.full_like(out["prob"], 0.5)
         return {
             "logit_f": out["logit"],
             "p_f": out["prob"],
-            "logit_v": out["logit"],
+            "logit_v": dummy_logit_v,  # Detached zero tensor
             "logit_a": out["logit"],
-            "p_v": out["prob"],
+            "p_v": dummy_p_v,
             "p_a": out["prob"],
             "w_v": torch.zeros_like(out["prob"]),
             "w_a": torch.ones_like(out["prob"]),
-            "uncertainty_v": torch.zeros_like(out["uncertainty"]),
+            "uncertainty_v": torch.ones_like(out["uncertainty"]),
             "uncertainty_a": out["uncertainty"],
-            "sync_features": torch.zeros(mel_spec.shape[0], 4, device=mel_spec.device),
-            "gate_logits": torch.zeros(mel_spec.shape[0], 2, device=mel_spec.device),
-            "visual_missing": torch.ones(batch_size, 1, device=mel_spec.device),
-            "audio_missing": kwargs.get("audio_missing", torch.zeros(batch_size, 1, device=mel_spec.device)),
+            "sync_features": torch.zeros(batch_size, 4, device=device),
+            "gate_logits": torch.zeros(batch_size, 2, device=device),
+            "visual_missing": torch.ones(batch_size, 1, device=device),
+            "audio_missing": kwargs.get("audio_missing", torch.zeros(batch_size, 1, device=device)),
         }
 
 
@@ -203,7 +209,13 @@ def train_unimodal(
 
     result = run_training(
         model=model,
-        loss_fn=CombinedLoss(alpha=0.0, beta=0.0, gamma=0.0, eta=0.0),
+        loss_fn=CombinedLoss(
+            alpha=0.0,
+            beta=0.0,
+            gamma=0.0,
+            eta=0.0,
+            label_smoothing=getattr(train_config.loss, "label_smoothing", 0.0),
+        ),
         stage="unimodal",
         run_name=f"unimodal_{modality}",
         data_config_path=data_config_path,

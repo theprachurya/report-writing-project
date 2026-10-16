@@ -190,3 +190,113 @@ def test_fusion_classifier_with_zeroed_inputs() -> None:
     p_f2 = out2["prob"]
     assert not torch.isnan(p_f2).any()
     assert (p_f2 >= 0.0).all() and (p_f2 <= 1.0).all()
+
+
+def test_modality_head_uncertainty_and_missing_neutralization() -> None:
+    """ModalityHead computes uncertainty proxy and cleanly neutralizes on missing modality."""
+    from src.models.modality_heads import ModalityHead, ModalityHeads
+
+    head = ModalityHead(input_dim=32, hidden_dim=16)
+    b = 4
+    z = torch.randn(b, 32)
+
+    # Active forward
+    out = head(z)
+    prob = out["prob"]
+    expected_uncertainty = 1.0 - torch.abs(2.0 * prob - 1.0)
+    assert torch.allclose(out["uncertainty"], expected_uncertainty, atol=1e-6)
+
+    # Missing modality forward
+    missing = torch.tensor([[0.0], [1.0], [0.0], [1.0]])
+    out_masked = head(z, missing=missing)
+    # When missing: logit=0, prob=0.5, uncertainty=1.0, pooled=0
+    assert out_masked["logit"][1].item() == 0.0
+    assert out_masked["prob"][1].item() == 0.5
+    assert out_masked["uncertainty"][1].item() == 1.0
+    assert (out_masked["pooled_features"][1] == 0.0).all()
+
+    # Container ModalityHeads forward with masks
+    heads = ModalityHeads(input_dim=32, hidden_dim=16)
+    out_both = heads(z, z, visual_missing=missing, audio_missing=1.0 - missing)
+    assert out_both["visual"]["prob"][1].item() == 0.5
+    assert out_both["audio"]["prob"][0].item() == 0.5
+
+
+def test_full_model_reliability_input_dim() -> None:
+    """FullModel dynamically and accurately computes reliability_input_dim across ablations."""
+    model = FullModel()
+    # ve(256) + 1 + ae(256) + 1 + qv(7) + qa(5) + sync(4) + 2 missing flags = 542
+    expected_dim = 256 + 1 + 256 + 1 + 7 + 5 + 4 + 2
+    assert model.reliability_input_dim == expected_dim
+    assert model.reliability_estimator.input_dim == expected_dim
+
+
+def test_unimodal_dummy_logits_are_detached_zeros() -> None:
+    """Unimodal models use detached zero tensors for dummy opposite logits."""
+    from src.train.train_unimodal import UnimodalVisualModel, UnimodalAudioModel
+
+    b = 2
+    v_model = UnimodalVisualModel()
+    frames = torch.randn(b, 16, 3, 160, 160)
+    v_out = v_model(frames=frames)
+    assert (v_out["logit_a"] == 0.0).all()
+    assert v_out["logit_a"].grad_fn is None  # Detached!
+    assert (v_out["p_a"] == 0.5).all()
+
+    a_model = UnimodalAudioModel()
+    mel = torch.randn(b, 1, 80, 200)
+    a_out = a_model(mel_spec=mel)
+    assert (a_out["logit_v"] == 0.0).all()
+    assert a_out["logit_v"].grad_fn is None  # Detached!
+    assert (a_out["p_v"] == 0.5).all()
+
+
+def test_trainer_checkpoint_full_state_and_weights_only(tmp_path: any) -> None:
+    """Trainer saves scaler, scheduler, and RNG state and loads with weights_only."""
+    import tempfile
+    from src.train.trainer import Trainer
+
+    model = torch.nn.Linear(10, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max")
+    loss_fn = lambda pred, target: {"total": ((pred["logit_f"] - target) ** 2).mean()}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        config = {
+            "checkpoint": {"save_dir": temp_dir, "save_every_n_epochs": 1, "save_best": True, "metric_for_best": "val_auroc"},
+            "early_stopping": {"enabled": False},
+            "amp": {"enabled": False},
+        }
+        trainer = Trainer(model, optimizer, loss_fn, config, scheduler=scheduler)
+        # Test saving checkpoint
+        trainer._save_checkpoint(epoch=1, metrics={"val_auroc": 0.85})
+        ckpt_path = trainer.ckpt_dir / "checkpoint_epoch_1.pt"
+        assert ckpt_path.is_file()
+
+        # Test loading checkpoint with weights_only=True
+        ckpt = trainer.load_checkpoint(ckpt_path, weights_only=True)
+        assert "model_state_dict" in ckpt
+        assert "optimizer_state_dict" in ckpt
+        assert "seed_state" in ckpt
+        assert "torch" in ckpt["seed_state"]
+
+
+def test_distillation_teacher_eval_mode_and_no_grad() -> None:
+    """DistillationTrainer ensures teacher stays in eval mode with no gradients."""
+    from src.train.distillation import DistillationTrainer
+
+    teacher = torch.nn.Sequential(torch.nn.Linear(10, 1))
+    student = torch.nn.Sequential(torch.nn.Linear(10, 1))
+
+    # Even if teacher was initially in train mode
+    teacher.train()
+    distiller = DistillationTrainer(
+        teacher=teacher,
+        student=student,
+        alpha=0.5,
+        temperature=2.0,
+    )
+    assert not distiller.teacher.training  # In eval mode!
+    for p in distiller.teacher.parameters():
+        assert not p.requires_grad
+

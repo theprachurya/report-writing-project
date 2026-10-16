@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 def fusion_bce_loss(
     logit_f: torch.Tensor,
     target: torch.Tensor,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     """Fusion binary cross-entropy loss L_f = BCE(y, p_f).
 
@@ -29,6 +30,8 @@ def fusion_bce_loss(
         Fused logit ``(B, 1)``.
     target:
         Binary target ``(B, 1)`` or ``(B,)``.
+    label_smoothing:
+        Label smoothing epsilon for regularizing predictions (default 0.0).
 
     Returns
     -------
@@ -36,6 +39,8 @@ def fusion_bce_loss(
         Scalar loss.
     """
     target = target.float().view_as(logit_f)
+    if label_smoothing > 0.0:
+        target = target * (1.0 - label_smoothing) + 0.5 * label_smoothing
     return F.binary_cross_entropy_with_logits(logit_f, target)
 
 
@@ -45,6 +50,7 @@ def unimodal_bce_loss(
     target: torch.Tensor,
     visual_missing: torch.Tensor | None = None,
     audio_missing: torch.Tensor | None = None,
+    label_smoothing: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Unimodal BCE losses for visual and audio heads.
 
@@ -56,6 +62,12 @@ def unimodal_bce_loss(
         Audio logit ``(B, 1)``.
     target:
         Binary target ``(B, 1)`` or ``(B,)``.
+    visual_missing:
+        Optional boolean/float tensor indicating missing visual modality.
+    audio_missing:
+        Optional boolean/float tensor indicating missing audio modality.
+    label_smoothing:
+        Label smoothing epsilon (default 0.0).
 
     Returns
     -------
@@ -63,6 +75,8 @@ def unimodal_bce_loss(
         ``(loss_v, loss_a, combined)`` where combined = loss_v + loss_a.
     """
     target = target.float().view(-1, 1)
+    if label_smoothing > 0.0:
+        target = target * (1.0 - label_smoothing) + 0.5 * label_smoothing
     per_v = F.binary_cross_entropy_with_logits(logit_v, target, reduction="none")
     per_a = F.binary_cross_entropy_with_logits(logit_a, target, reduction="none")
     mask_v = (
@@ -141,12 +155,14 @@ def reliability_loss(
     neg_losses[:, 0] = neg_losses[:, 0].masked_fill(missing_v, -torch.inf)
     neg_losses[:, 1] = neg_losses[:, 1].masked_fill(missing_a, -torch.inf)
     neg_losses[both_missing] = 0.0
-    soft_targets = F.softmax(neg_losses / tau_r, dim=-1)  # (B, 2)
+    soft_targets = F.softmax((neg_losses / tau_r).clamp(-50.0, 50.0), dim=-1)  # (B, 2)
 
     # KL(t || w) = Σ t_m * log(t_m / w_m)
-    # Use F.kl_div which expects log(w) as input
-    log_weights = torch.log(weights + 1e-8)  # (B, 2)
-    per_sample_kl = F.kl_div(log_weights, soft_targets, reduction="none").sum(dim=-1)
+    # Use F.kl_div which expects log(w) as input, with explicit log_target=False
+    log_weights = torch.log(weights.clamp_min(1e-8))  # (B, 2)
+    per_sample_kl = F.kl_div(
+        log_weights, soft_targets, reduction="none", log_target=False
+    ).sum(dim=-1)
     valid = (~both_missing).to(per_sample_kl.dtype)
     kl = (per_sample_kl * valid).sum() / valid.sum().clamp_min(1.0)
 
@@ -156,10 +172,11 @@ def reliability_loss(
 def contrastive_loss(
     proj_v: torch.Tensor,
     proj_a: torch.Tensor,
-    is_real: torch.Tensor,
+    is_real: torch.Tensor | None = None,
+    target: torch.Tensor | None = None,
     temperature: float = 0.07,
 ) -> torch.Tensor:
-    """Optional InfoNCE contrastive loss L_con on real, aligned pairs.
+    """Optional InfoNCE contrastive loss L_con on real, aligned pairs per Section 8.
 
     Matching audio/video temporal bins from real clips are positives;
     other clips/bins are negatives.  Omitted if it harms the small-data setting.
@@ -167,28 +184,37 @@ def contrastive_loss(
     Parameters
     ----------
     proj_v:
-        Projected visual embeddings ``(B, T, D)`` — only real samples used.
+        Projected visual embeddings ``(B, T, D)``.
     proj_a:
         Projected audio embeddings ``(B, T, D)``.
     is_real:
-        Boolean mask ``(B,)`` indicating real samples.
+        Optional boolean/float mask ``(B,)`` or ``(B, 1)`` indicating real samples.
+    target:
+        Optional binary target ``(B,)`` or ``(B, 1)``. If provided and is_real is None,
+        real samples are filtered via ``is_real = (target.view(-1) == 0)`` per Section 8.
     temperature:
         InfoNCE temperature (default 0.07).
 
     Returns
     -------
     torch.Tensor
-        Scalar contrastive loss (0 if no real samples in batch).
+        Scalar contrastive loss (0.0 if fewer than 2 real samples in batch).
     """
-    # Only use real, aligned pairs
-    real_mask = is_real.bool()
+    if is_real is None and target is not None:
+        real_mask = (target.view(-1) == 0).bool()
+    elif is_real is not None:
+        real_mask = (is_real.view(-1) >= 0.5).bool()
+    else:
+        real_mask = torch.ones(proj_v.shape[0], dtype=torch.bool, device=proj_v.device)
+
+    # Empty or single-sample real batch handled gracefully per Section 8
     if real_mask.sum() < 2:
         return torch.tensor(0.0, device=proj_v.device)
 
     v = proj_v[real_mask]  # (N_real, T, D)
     a = proj_a[real_mask]
 
-    # Pool over time for simplicity
+    # Pool over time for alignment comparison
     v = F.normalize(v.mean(dim=1), dim=-1)  # (N_real, D)
     a = F.normalize(a.mean(dim=1), dim=-1)  # (N_real, D)
 
@@ -204,7 +230,7 @@ def contrastive_loss(
     loss_va = F.cross_entropy(sim_va, labels)
     loss_av = F.cross_entropy(sim_av, labels)
 
-    return (loss_va + loss_av) / 2
+    return (loss_va + loss_av) / 2.0
 
 
 def balance_loss(
@@ -233,6 +259,8 @@ class CombinedLoss(nn.Module):
 
     L = L_f + α(BCE_v + BCE_a) + β·L_rel + γ·L_con + η·L_bal
 
+    Supports auto-disable and weighting schedule for balance_loss.
+
     Parameters
     ----------
     alpha:
@@ -245,6 +273,12 @@ class CombinedLoss(nn.Module):
         Balance regularization weight (default 0.0).
     tau_r:
         Temperature for reliability soft target (default 1.0).
+    label_smoothing:
+        Label smoothing epsilon (default 0.0).
+    balance_warmup_epochs:
+        Number of epochs to keep balance loss active (auto-disabled afterwards).
+    balance_schedule:
+        Schedule type for balance weight: "none", "step", or "linear".
     """
 
     def __init__(
@@ -254,6 +288,9 @@ class CombinedLoss(nn.Module):
         gamma: float = 0.05,
         eta: float = 0.0,
         tau_r: float = 1.0,
+        label_smoothing: float = 0.0,
+        balance_warmup_epochs: int = 0,
+        balance_schedule: str = "none",
     ) -> None:
         super().__init__()
         self.alpha = alpha
@@ -261,6 +298,32 @@ class CombinedLoss(nn.Module):
         self.gamma = gamma
         self.eta = eta
         self.tau_r = tau_r
+        self.label_smoothing = label_smoothing
+        self.balance_warmup_epochs = balance_warmup_epochs
+        self.balance_schedule = balance_schedule
+        self.current_epoch = 1
+
+    def set_epoch(self, epoch: int) -> None:
+        """Update current training epoch for balance loss scheduling."""
+        self.current_epoch = epoch
+
+    def _get_effective_eta(self, epoch: int | None = None) -> float:
+        """Compute effective eta based on schedule and epoch."""
+        ep = epoch if epoch is not None else self.current_epoch
+        if self.eta <= 0.0:
+            return 0.0
+        if self.balance_warmup_epochs <= 0:
+            return self.eta
+
+        if self.balance_schedule == "linear":
+            if ep > self.balance_warmup_epochs:
+                return 0.0
+            return self.eta * max(0.0, 1.0 - (ep - 1) / float(self.balance_warmup_epochs))
+        else:
+            # Step schedule: active for warmup epochs, then auto-disabled (0.0)
+            if ep > self.balance_warmup_epochs:
+                return 0.0
+            return self.eta
 
     def forward(
         self,
@@ -268,6 +331,7 @@ class CombinedLoss(nn.Module):
         target: torch.Tensor,
         proj_v: torch.Tensor | None = None,
         proj_a: torch.Tensor | None = None,
+        epoch: int | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute the full combined loss.
 
@@ -281,6 +345,8 @@ class CombinedLoss(nn.Module):
             Projected visual embeddings for L_con (optional).
         proj_a:
             Projected audio embeddings for L_con (optional).
+        epoch:
+            Optional epoch number for balance loss schedule.
 
         Returns
         -------
@@ -293,6 +359,10 @@ class CombinedLoss(nn.Module):
             - ``"L_bal"``: balance regularization
         """
         target = target.float().view(-1, 1)
+        smoothed_target = target
+        if self.label_smoothing > 0.0:
+            smoothed_target = target * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
+
         visual_missing = model_output.get("visual_missing")
         audio_missing = model_output.get("audio_missing")
         logit_f = model_output["logit_f"]
@@ -302,7 +372,7 @@ class CombinedLoss(nn.Module):
                 (visual_missing.reshape(-1, 1).to(target.device) >= 0.5)
                 & (audio_missing.reshape(-1, 1).to(target.device) >= 0.5)
             )
-        per_fusion = F.binary_cross_entropy_with_logits(logit_f, target, reduction="none")
+        per_fusion = F.binary_cross_entropy_with_logits(logit_f, smoothed_target, reduction="none")
         l_f = (per_fusion * has_input.to(per_fusion.dtype)).sum() / has_input.sum().clamp_min(1)
 
         # Unimodal BCE
@@ -310,6 +380,7 @@ class CombinedLoss(nn.Module):
             model_output["logit_v"], model_output["logit_a"], target,
             visual_missing=visual_missing,
             audio_missing=audio_missing,
+            label_smoothing=self.label_smoothing,
         )
 
         # L_rel: reliability loss
@@ -325,15 +396,15 @@ class CombinedLoss(nn.Module):
                 audio_missing=audio_missing,
             )
 
-        # L_con: contrastive loss
+        # L_con: contrastive loss (filtered to real samples per Section 8)
         l_con = torch.tensor(0.0, device=l_f.device)
         if self.gamma > 0 and proj_v is not None and proj_a is not None:
-            is_real = (target.view(-1) == 0).float()
-            l_con = contrastive_loss(proj_v, proj_a, is_real)
+            l_con = contrastive_loss(proj_v, proj_a, target=target)
 
-        # L_bal: balance regularization
+        # L_bal: balance regularization with auto-disable or schedule
+        effective_eta = self._get_effective_eta(epoch)
         l_bal = torch.tensor(0.0, device=l_f.device)
-        if self.eta > 0:
+        if effective_eta > 0 and "w_v" in model_output and "w_a" in model_output:
             weights = torch.cat(
                 [model_output["w_v"], model_output["w_a"]], dim=-1
             )
@@ -345,7 +416,7 @@ class CombinedLoss(nn.Module):
             + self.alpha * l_unimodal
             + self.beta * l_rel
             + self.gamma * l_con
-            + self.eta * l_bal
+            + effective_eta * l_bal
         )
 
         return {

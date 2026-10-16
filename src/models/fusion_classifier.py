@@ -24,7 +24,7 @@ class FusionClassifier(nn.Module):
     Supports ablation baselines (Section 9.1):
     - ``"equal_weight"``: w_v = w_a = 0.5 (baseline 3)
     - ``"concat"``: simple concatenation (baseline 4)
-    - ``"learned_global"``: single learned [w_v, w_a] for all samples (baseline 5)
+    - ``"learned_global"`` / ``"learned_fixed"``: single learned [w_v, w_a] for all samples (baseline 5)
     - ``"reliability"``: per-sample reliability weights (full system, baseline 8)
 
     Parameters
@@ -39,7 +39,7 @@ class FusionClassifier(nn.Module):
         Dropout probability (default 0.2).
     fusion_mode:
         One of ``"equal_weight"``, ``"concat"``, ``"learned_global"``,
-        ``"reliability"`` (default).
+        ``"learned_fixed"``, ``"reliability"`` (default).
     use_sync_features:
         Whether to include sync features in fusion input.
     """
@@ -62,7 +62,7 @@ class FusionClassifier(nn.Module):
         # Compute input dimension based on fusion mode
         if fusion_mode == "concat":
             input_dim = embedding_dim * 2  # [z_v_bar, z_a_bar]
-        elif fusion_mode in ("equal_weight", "learned_global", "reliability"):
+        elif fusion_mode in ("equal_weight", "learned_global", "learned_fixed", "reliability"):
             input_dim = embedding_dim * 2 + 2  # [w_v*z_v_bar, w_a*z_a_bar, w_v, w_a]
         else:
             raise ValueError(f"Unknown fusion_mode: {fusion_mode}")
@@ -70,8 +70,8 @@ class FusionClassifier(nn.Module):
         if use_sync_features:
             input_dim += sync_feature_dim
 
-        # Learned global weights for baseline 5
-        if fusion_mode == "learned_global":
+        # Learned global/fixed weights for baseline 5
+        if fusion_mode in ("learned_global", "learned_fixed"):
             self.global_gate_logits = nn.Parameter(torch.zeros(2))
 
         # Classifier MLP
@@ -126,20 +126,30 @@ class FusionClassifier(nn.Module):
             - ``"w_v"``: visual weight used ``(B, 1)``
             - ``"w_a"``: audio weight used ``(B, 1)``
         """
+        if z_v_bar.dim() != 2 or z_a_bar.dim() != 2:
+            raise ValueError(
+                f"Expected 2D tensors (B, D) for z_v_bar and z_a_bar, got {z_v_bar.shape} and {z_a_bar.shape}"
+            )
+        if z_v_bar.shape[0] != z_a_bar.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch: z_v_bar has {z_v_bar.shape[0]}, z_a_bar has {z_a_bar.shape[0]}"
+            )
+
         B = z_v_bar.shape[0]
 
         # Determine weights based on fusion mode
         if self.fusion_mode == "equal_weight":
             w_v_used = torch.full((B, 1), 0.5, device=z_v_bar.device)
             w_a_used = torch.full((B, 1), 0.5, device=z_v_bar.device)
-        elif self.fusion_mode == "learned_global":
+        elif self.fusion_mode in ("learned_global", "learned_fixed"):
             global_weights = torch.softmax(self.global_gate_logits, dim=0)
             w_v_used = global_weights[0].expand(B, 1)
             w_a_used = global_weights[1].expand(B, 1)
         elif self.fusion_mode == "reliability":
-            assert w_v is not None and w_a is not None, (
-                "Reliability mode requires w_v and w_a from the reliability estimator"
-            )
+            if w_v is None or w_a is None:
+                raise ValueError(
+                    "Reliability mode requires w_v and w_a from the reliability estimator"
+                )
             w_v_used = w_v
             w_a_used = w_a
         elif self.fusion_mode == "concat":
@@ -170,22 +180,22 @@ class FusionClassifier(nn.Module):
                 z_v_bar = z_v_bar.masked_fill(visual_missing, 0.0)
                 z_a_bar = z_a_bar.masked_fill(audio_missing, 0.0)
 
-        # Build fusion input
+        # Build fusion input: [w_v * z̄_v, w_a * z̄_a, c, w_v, w_a] per Section 7.1
         if self.fusion_mode == "concat":
             parts = [z_v_bar, z_a_bar]
+            if self.use_sync_features:
+                if sync_features is not None:
+                    parts.append(sync_features)
+                else:
+                    parts.append(torch.zeros(B, self.sync_feature_dim, device=z_v_bar.device))
         else:
-            # Weighted features + explicit weights
-            parts = [
-                w_v_used * z_v_bar,
-                w_a_used * z_a_bar,
-                w_v_used,
-                w_a_used,
-            ]
-
-        if self.use_sync_features and sync_features is not None:
-            parts.append(sync_features)
-        elif self.use_sync_features:
-            parts.append(torch.zeros(B, self.sync_feature_dim, device=z_v_bar.device))
+            parts = [w_v_used * z_v_bar, w_a_used * z_a_bar]
+            if self.use_sync_features:
+                if sync_features is not None:
+                    parts.append(sync_features)
+                else:
+                    parts.append(torch.zeros(B, self.sync_feature_dim, device=z_v_bar.device))
+            parts.extend([w_v_used, w_a_used])
 
         fusion_input = torch.cat(parts, dim=-1)
 

@@ -4,10 +4,10 @@
 # ── Dataset paths (override via CLI or env) ─────────────────────────────────
 datasets:
   fakeavceleb:
-    root: "${FAKEAVCELEB_ROOT}"        # User sets this env var or overrides in CLI
+    root: "${FAKEAVCELEB_ROOT:-data/raw/FakeAVCeleb_v1.2}"  # Override via FAKEAVCELEB_ROOT env var
     role: "main_multimodal"            # Primary multimodal benchmark
   dfdc:
-    root: "${DFDC_ROOT}"               # Optional; visual pretraining / robustness
+    root: "${DFDC_ROOT:-data/raw/dfdc}"  # Override via DFDC_ROOT env var
     role: "visual_transfer"            # Do NOT claim audio-deepfake unless audited
 
 # ── Video decode ─────────────────────────────────────────────────────────────

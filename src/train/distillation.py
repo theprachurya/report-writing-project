@@ -130,11 +130,10 @@ class DistillationTrainer:
             sum(p.numel() for p in student.parameters()),
         )
 
-    @torch.no_grad()
     def get_teacher_logits(
         self, batch: dict[str, torch.Tensor]
     ) -> torch.Tensor:
-        """Get teacher model logits for a batch.
+        """Get teacher model logits for a batch under eval mode and no_grad.
 
         Parameters
         ----------
@@ -146,13 +145,15 @@ class DistillationTrainer:
         torch.Tensor
             Teacher logits ``(B, 1)``.
         """
-        output = self.teacher(
-            frames=batch["frames"],
-            mel_spec=batch["mel_spec"],
-            quality_v=batch.get("quality_v"),
-            quality_a=batch.get("quality_a"),
-        )
-        return output["logit_f"]
+        self.teacher.eval()
+        with torch.no_grad():
+            output = self.teacher(
+                frames=batch["frames"],
+                mel_spec=batch["mel_spec"],
+                quality_v=batch.get("quality_v"),
+                quality_a=batch.get("quality_a"),
+            )
+            return output["logit_f"].detach()
 
     def train_step(
         self,
@@ -170,7 +171,9 @@ class DistillationTrainer:
         dict[str, torch.Tensor]
             Loss components.
         """
-        teacher_logit = self.get_teacher_logits(batch)
+        self.teacher.eval()
+        with torch.no_grad():
+            teacher_logit = self.get_teacher_logits(batch)
 
         student_output = self.student(
             frames=batch["frames"],

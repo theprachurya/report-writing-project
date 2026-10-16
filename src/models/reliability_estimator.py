@@ -62,13 +62,15 @@ class ReliabilityEstimator(nn.Module):
         hidden_dim: int = 128,
         dropout: float = 0.1,
         gate_temperature: float = 1.0,
+        T_g: float | None = None,
         use_sync_features: bool = True,
         use_quality_features: bool = True,
         quality_visual_dim: int = 7,
         quality_audio_dim: int = 5,
     ) -> None:
         super().__init__()
-        self.gate_temperature = gate_temperature
+        self.gate_temperature = T_g if T_g is not None else gate_temperature
+        self.T_g = self.gate_temperature
         self.use_sync_features = use_sync_features
         self.use_quality_features = use_quality_features
         self.quality_visual_dim = quality_visual_dim
@@ -102,7 +104,7 @@ class ReliabilityEstimator(nn.Module):
         logger.info(
             "ReliabilityEstimator: input_dim=%d, hidden=%d, T_g=%.2f, "
             "sync=%s, quality=%s",
-            input_dim, hidden_dim, gate_temperature,
+            input_dim, hidden_dim, self.T_g,
             use_sync_features, use_quality_features,
         )
 
@@ -117,6 +119,8 @@ class ReliabilityEstimator(nn.Module):
         quality_a: torch.Tensor | None = None,
         visual_missing: torch.Tensor | None = None,
         audio_missing: torch.Tensor | None = None,
+        T_g: float | None = None,
+        gate_temperature: float | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute reliability gate weights.
 
@@ -140,6 +144,10 @@ class ReliabilityEstimator(nn.Module):
             Visual modality missing flag ``(B, 1)`` or ``None``.
         audio_missing:
             Audio modality missing flag ``(B, 1)`` or ``None``.
+        T_g:
+            Optional temperature override for softmax scaling.
+        gate_temperature:
+            Optional alias for T_g.
 
         Returns
         -------
@@ -151,6 +159,39 @@ class ReliabilityEstimator(nn.Module):
         """
         B = h_v.shape[0]
         device = h_v.device
+
+        # Resolve temperature T_g
+        temp = T_g if T_g is not None else (
+            gate_temperature if gate_temperature is not None else self.T_g
+        )
+        if temp <= 0:
+            raise ValueError(f"Temperature T_g must be positive, got {temp}")
+
+        # Missingness flags are always present in the gate input.
+        visual_missing_tensor = self._missing_flag(visual_missing, B, device)
+        audio_missing_tensor = self._missing_flag(audio_missing, B, device)
+        missing_v = visual_missing_tensor[:, 0] >= 0.5
+        missing_a = audio_missing_tensor[:, 0] >= 0.5
+        both_missing = missing_v & missing_a
+
+        # Cleanly neutralize inputs for missing modalities
+        if visual_missing is not None:
+            v_mask = missing_v.unsqueeze(-1)
+            h_v = h_v.masked_fill(v_mask, 0.0)
+            uncertainty_v = uncertainty_v.masked_fill(v_mask, 1.0)
+            if quality_v is not None:
+                quality_v = quality_v.masked_fill(v_mask, 0.0)
+
+        if audio_missing is not None:
+            a_mask = missing_a.unsqueeze(-1)
+            h_a = h_a.masked_fill(a_mask, 0.0)
+            uncertainty_a = uncertainty_a.masked_fill(a_mask, 1.0)
+            if quality_a is not None:
+                quality_a = quality_a.masked_fill(a_mask, 0.0)
+
+        if sync_features is not None and (visual_missing is not None or audio_missing is not None):
+            either_missing = (missing_v | missing_a).unsqueeze(-1)
+            sync_features = sync_features.masked_fill(either_missing, 0.0)
 
         # Build input: [h_v, uncertainty_v, h_a, uncertainty_a, ...]
         parts = [h_v, uncertainty_v, h_a, uncertainty_a]
@@ -171,10 +212,7 @@ class ReliabilityEstimator(nn.Module):
             else:
                 parts.append(torch.zeros(B, self.sync_feature_dim, device=device))
 
-        # Missingness flags are always present in the gate input.
-        visual_missing = self._missing_flag(visual_missing, B, device)
-        audio_missing = self._missing_flag(audio_missing, B, device)
-        parts.extend([visual_missing, audio_missing])
+        parts.extend([visual_missing_tensor, audio_missing_tensor])
 
         # Concatenate all inputs
         gate_input = torch.cat(parts, dim=-1)  # (B, input_dim)
@@ -182,20 +220,33 @@ class ReliabilityEstimator(nn.Module):
         # MLP forward
         gate_logits = self.mlp(gate_input)  # (B, 2)
 
+        # Clean missing modality masking
         # A missing stream must not receive predictive weight. When both streams
         # are missing, use neutral weights; the classifier then sees zero features.
-        missing_v = visual_missing[:, 0] >= 0.5
-        missing_a = audio_missing[:, 0] >= 0.5
-        both_missing = missing_v & missing_a
         masked_logits = gate_logits.clone()
-        masked_logits[:, 0] = masked_logits[:, 0].masked_fill(missing_v, -torch.inf)
-        masked_logits[:, 1] = masked_logits[:, 1].masked_fill(missing_a, -torch.inf)
+        masked_logits[:, 0] = masked_logits[:, 0].masked_fill(missing_v, -1e4)
+        masked_logits[:, 1] = masked_logits[:, 1].masked_fill(missing_a, -1e4)
         masked_logits[both_missing] = 0.0
 
-        # Temperature-scaled softmax
-        weights = F.softmax(masked_logits / self.gate_temperature, dim=-1)  # (B, 2)
+        # Temperature-scaled softmax: softmax(logits / T_g, dim=-1)
+        weights = F.softmax(masked_logits / temp, dim=-1)  # (B, 2)
         w_v = weights[:, 0:1]  # (B, 1)
         w_a = weights[:, 1:2]  # (B, 1)
+
+        # Enforce exact bounds on missing modalities
+        only_v_missing = (missing_v & ~missing_a).unsqueeze(-1)
+        w_v = torch.where(only_v_missing, torch.zeros_like(w_v), w_v)
+        w_a = torch.where(only_v_missing, torch.ones_like(w_a), w_a)
+
+        only_a_missing = (missing_a & ~missing_v).unsqueeze(-1)
+        w_v = torch.where(only_a_missing, torch.ones_like(w_v), w_v)
+        w_a = torch.where(only_a_missing, torch.zeros_like(w_a), w_a)
+
+        both_m = both_missing.unsqueeze(-1)
+        w_v = torch.where(both_m, torch.full_like(w_v, 0.5), w_v)
+        w_a = torch.where(both_m, torch.full_like(w_a, 0.5), w_a)
+
+        weights = torch.cat([w_v, w_a], dim=-1)
 
         return {
             "w_v": w_v,

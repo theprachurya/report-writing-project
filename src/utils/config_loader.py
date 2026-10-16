@@ -7,31 +7,42 @@ merge-override support. See AGENTS.md for build order.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import re
+import typing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 
 # ── Environment variable expansion ───────────────────────────────────────────
 
-_ENV_PATTERN = re.compile(r"\$\{(\w+)\}")
+_ENV_PATTERN = re.compile(r"\$\{(\w+)(?::-?([^}]*))?\}")
 
 
 def _expand_env_vars(value: Any) -> Any:
-    """Recursively expand ``${VAR}`` patterns in string values using ``os.environ``.
+    """Recursively expand ``${VAR}`` or ``${VAR:-default}`` patterns in string values using ``os.environ``.
 
-    If the environment variable is not set the raw ``${VAR}`` string is kept so
-    that code can detect and raise an informative error instead of silently
-    using a partial path.
+    If the environment variable is not set and no default is provided, the raw
+    ``${VAR}`` string is kept so that code can detect and raise an informative
+    error instead of silently using a partial path.
     """
     if isinstance(value, str):
         def _replace(match: re.Match) -> str:
             var_name = match.group(1)
-            return os.environ.get(var_name, match.group(0))
+            default = match.group(2)
+            val = os.environ.get(var_name)
+            if val is not None and val != "":
+                return val
+            if default is not None:
+                return default
+            return match.group(0)
         return _ENV_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _expand_env_vars(v) for k, v in value.items()}
@@ -61,6 +72,8 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
     ------
     FileNotFoundError
         If *path* does not exist.
+    ValueError
+        If raw YAML output is not a dict.
     yaml.YAMLError
         If the file contains invalid YAML.
     """
@@ -68,7 +81,11 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
     with open(path, "r", encoding="utf-8") as fh:
-        raw: dict[str, Any] = yaml.safe_load(fh) or {}
+        raw = yaml.safe_load(fh)
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Config file at {path} must contain a YAML mapping (dict), got {type(raw).__name__}"
+        )
     return _expand_env_vars(raw)
 
 
@@ -258,6 +275,7 @@ class ReliabilityEstimatorConfig:
     hidden_dim: int = 128
     dropout: float = 0.1
     gate_temperature: float = 1.0
+    T_g: float = 1.0
 
 
 @dataclass
@@ -306,6 +324,7 @@ class LossConfig:
     gamma: float = 0.05
     eta: float = 0.0
     tau_r: float = 1.0
+    label_smoothing: float = 0.0
 
 
 @dataclass
@@ -415,20 +434,32 @@ def _build_dataclass(cls: type, data: dict[str, Any]) -> Any:
     if not dataclasses.is_dataclass(cls):
         return data
 
-    field_types = {f.name: f.type for f in dataclasses.fields(cls)}
+    try:
+        type_hints = typing.get_type_hints(cls)
+    except Exception:
+        type_hints = {}
+
+    field_types = {f.name: type_hints.get(f.name, f.type) for f in dataclasses.fields(cls)}
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
         if key not in field_types:
             continue  # skip unknown keys
         ft = field_types[key]
-        # Resolve string type annotations
-        if isinstance(ft, str):
-            ft = eval(ft, globals(), locals())  # noqa: S307 — trusted config schema
         if dataclasses.is_dataclass(ft) and isinstance(value, dict):
             kwargs[key] = _build_dataclass(ft, value)
         else:
             kwargs[key] = value
-    return cls(**kwargs)
+
+    try:
+        return cls(**kwargs)
+    except TypeError as err:
+        logger.error(
+            "Failed to instantiate dataclass %s with kwargs %s: %s",
+            cls.__name__,
+            kwargs,
+            err,
+        )
+        raise
 
 
 # ── Public loader functions ──────────────────────────────────────────────────
@@ -478,10 +509,11 @@ def load_data_config(
     DataConfig
         Typed data configuration object.
     """
+    resolved_path = Path(config_path).resolve() if config_path else None
     raw = load_config(
-        Path(config_path).stem if config_path else "data_config",
+        resolved_path.stem if resolved_path else "data_config",
         overrides=overrides,
-        config_dir=Path(config_path).parent if config_path else config_dir,
+        config_dir=resolved_path.parent if resolved_path else config_dir,
     )
     return _build_dataclass(DataConfig, raw)
 
@@ -498,10 +530,11 @@ def load_model_config(
     ModelConfig
         Typed model configuration object.
     """
+    resolved_path = Path(config_path).resolve() if config_path else None
     raw = load_config(
-        Path(config_path).stem if config_path else "model_config",
+        resolved_path.stem if resolved_path else "model_config",
         overrides=overrides,
-        config_dir=Path(config_path).parent if config_path else config_dir,
+        config_dir=resolved_path.parent if resolved_path else config_dir,
     )
     return _build_dataclass(ModelConfig, raw)
 
@@ -518,10 +551,11 @@ def load_train_config(
     TrainConfig
         Typed training configuration object.
     """
+    resolved_path = Path(config_path).resolve() if config_path else None
     raw = load_config(
-        Path(config_path).stem if config_path else "train_config",
+        resolved_path.stem if resolved_path else "train_config",
         overrides=overrides,
-        config_dir=Path(config_path).parent if config_path else config_dir,
+        config_dir=resolved_path.parent if resolved_path else config_dir,
     )
     return _build_dataclass(TrainConfig, raw)
 
@@ -538,9 +572,60 @@ def load_eval_config(
     EvalConfig
         Typed evaluation configuration object.
     """
+    resolved_path = Path(config_path).resolve() if config_path else None
     raw = load_config(
-        Path(config_path).stem if config_path else "eval_config",
+        resolved_path.stem if resolved_path else "eval_config",
         overrides=overrides,
-        config_dir=Path(config_path).parent if config_path else config_dir,
+        config_dir=resolved_path.parent if resolved_path else config_dir,
     )
     return _build_dataclass(EvalConfig, raw)
+
+
+def save_config_snapshot(
+    config: dict[str, Any] | Any,
+    output_path: str | Path,
+) -> Path:
+    """Save a snapshot of the configuration to a YAML file, including sha256 checksum.
+
+    Satisfies the reproducibility checklist item: *"Config file saved
+    with every checkpoint and metric artifact."*
+
+    Parameters
+    ----------
+    config:
+        Config dictionary or dataclass instance.
+    output_path:
+        Destination directory or file path.
+
+    Returns
+    -------
+    Path
+        Path to the saved configuration snapshot file.
+    """
+    import dataclasses
+
+    out_path = Path(output_path)
+    if out_path.is_dir() or not out_path.suffix:
+        out_path.mkdir(parents=True, exist_ok=True)
+        out_path = out_path / "config_snapshot.yaml"
+    else:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if dataclasses.is_dataclass(config):
+        cfg_dict = dataclasses.asdict(config)
+    elif isinstance(config, dict):
+        cfg_dict = dict(config)
+    else:
+        cfg_dict = dict(config)
+
+    content_str = yaml.dump(cfg_dict, sort_keys=True)
+    cfg_hash = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
+    cfg_dict["config_sha256"] = cfg_hash
+    cfg_dict["config_hash"] = cfg_hash
+
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(f"# SHA256: {cfg_hash}\n")
+        yaml.dump(cfg_dict, fh, default_flow_style=False, sort_keys=False)
+
+    logger.info("Config snapshot saved to %s (sha256=%s)", out_path, cfg_hash)
+    return out_path

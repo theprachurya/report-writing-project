@@ -38,7 +38,7 @@ class CrossDatasetResult:
     source_dataset: str
     target_dataset: str
     transfer_type: str
-    metrics: dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, Any] = field(default_factory=dict)
     compatibility_checks: dict[str, bool] = field(default_factory=dict)
 
 
@@ -52,6 +52,7 @@ _AUDIO_UNVERIFIED_DATASETS = {"dfdc"}
 def check_label_compatibility(
     source_dataset: str,
     target_dataset: str,
+    audio_audited: bool = False,
 ) -> dict[str, bool]:
     """Check whether cross-dataset evaluation is valid.
 
@@ -61,28 +62,37 @@ def check_label_compatibility(
         Training dataset name.
     target_dataset:
         Target evaluation dataset name.
+    audio_audited:
+        Whether target dataset audio labels have been explicitly audited.
 
     Returns
     -------
     dict[str, bool]
         Compatibility check results.
     """
+    import warnings
+
     checks: dict[str, bool] = {}
 
-    # Audio label compatibility
     target_lower = target_dataset.lower()
-    checks["audio_labels_verified"] = target_lower in _AUDIO_VERIFIED_DATASETS
     checks["visual_transfer_valid"] = True  # Visual transfer always valid
 
-    if target_lower in _AUDIO_UNVERIFIED_DATASETS:
-        logger.warning(
-            "Dataset '%s' audio labels are NOT verified for deepfake claims. "
-            "Restricting to visual-transfer evaluation only.",
-            target_dataset,
-        )
-        checks["audio_claim_allowed"] = False
+    if "dfdc" in target_lower or target_lower in _AUDIO_UNVERIFIED_DATASETS:
+        if not audio_audited:
+            msg = (
+                f"Dataset '{target_dataset}' audio labels are NOT verified for deepfake claims. "
+                "Restricting to visual-only transfer evaluation per PROJECT_BRIEF Section 9.2."
+            )
+            logger.warning(msg)
+            warnings.warn(msg, UserWarning, stacklevel=2)
+            checks["audio_labels_verified"] = False
+            checks["audio_claim_allowed"] = False
+        else:
+            checks["audio_labels_verified"] = True
+            checks["audio_claim_allowed"] = True
     else:
-        checks["audio_claim_allowed"] = True
+        checks["audio_labels_verified"] = target_lower in _AUDIO_VERIFIED_DATASETS
+        checks["audio_claim_allowed"] = checks["audio_labels_verified"]
 
     return checks
 
@@ -93,12 +103,14 @@ def evaluate_cross_dataset(
     source_dataset: str,
     target_dataset: str,
     threshold: float | None = None,
+    audio_audited: bool = False,
 ) -> CrossDatasetResult:
     """Evaluate cross-dataset transfer performance.
 
     AUROC is reported with NO threshold retuning (Section 9.2).
-    If the target dataset's audio labels are unverified, only visual-transfer
-    metrics are reported.
+    A pre-selected threshold from validation is required.
+    If the target dataset's audio labels are unverified (e.g., DFDC),
+    only visual-transfer scope is allowed.
 
     Parameters
     ----------
@@ -111,14 +123,34 @@ def evaluate_cross_dataset(
     target_dataset:
         Name of the evaluation dataset.
     threshold:
-        Decision threshold from source validation (no retuning).
+        Decision threshold pre-selected from source validation (no retuning).
+    audio_audited:
+        Whether audio labels in target dataset are audited.
 
     Returns
     -------
     CrossDatasetResult
         Transfer evaluation results with compatibility checks.
     """
-    compatibility = check_label_compatibility(source_dataset, target_dataset)
+    targets = np.asarray(targets).flatten()
+    probabilities = np.asarray(probabilities).flatten()
+
+    if len(targets) != len(probabilities):
+        raise ValueError(
+            f"Targets length ({len(targets)}) does not match probabilities length ({len(probabilities)})"
+        )
+    if len(targets) == 0:
+        raise ValueError("Cannot evaluate cross-dataset metrics on empty data.")
+
+    if threshold is None:
+        raise ValueError(
+            "Cross-dataset evaluation requires a pre-selected threshold from validation data. "
+            "Auto-retuning threshold on test data is prohibited per PROJECT_BRIEF Section 9.2."
+        )
+
+    compatibility = check_label_compatibility(
+        source_dataset, target_dataset, audio_audited=audio_audited
+    )
 
     # Determine transfer type
     if compatibility.get("audio_claim_allowed", False):

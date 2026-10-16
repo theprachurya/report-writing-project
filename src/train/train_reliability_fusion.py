@@ -161,6 +161,7 @@ def train_reliability_fusion(
         gamma=loss_cfg.gamma,
         eta=loss_cfg.eta,
         tau_r=loss_cfg.tau_r,
+        label_smoothing=getattr(loss_cfg, "label_smoothing", 0.0),
     )
     result = run_training(
         model=model,

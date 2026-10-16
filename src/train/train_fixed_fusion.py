@@ -60,6 +60,11 @@ class FixedFusionModel(nn.Module):
         mh = cfg.modality_heads
         fc = cfg.fusion_classifier
 
+        ab = cfg.ablation if hasattr(cfg, "ablation") else None
+        use_sync = ab.use_sync_features if (ab and hasattr(ab, "use_sync_features")) else True
+        self.use_sync = use_sync
+        self.sync_feature_dim = sf.output_dim
+
         self.visual_encoder = VisualEncoder(
             backbone=ve.backbone,
             pretrained=ve.pretrained,
@@ -77,6 +82,7 @@ class FixedFusionModel(nn.Module):
         )
         self.sync_extractor = SyncFeatureExtractor(
             offsets=sf.offsets if hasattr(sf, 'offsets') else [-2, -1, 0, 1, 2],
+            output_dim=sf.output_dim,
         )
         self.modality_heads = ModalityHeads(
             input_dim=mh.input_dim,
@@ -85,9 +91,11 @@ class FixedFusionModel(nn.Module):
         )
         self.fusion_classifier = FusionClassifier(
             embedding_dim=ve.embedding_dim,
+            sync_feature_dim=sf.output_dim,
             hidden_dim=fc.hidden_dim,
             dropout=fc.dropout,
             fusion_mode=fusion_mode,
+            use_sync_features=use_sync,
         )
 
     def forward(
@@ -129,15 +137,23 @@ class FixedFusionModel(nn.Module):
             unavailable |= audio_missing.reshape(-1, 1).to(frames.device) >= 0.5
         sync_features = sync_features.masked_fill(unavailable, 0.0)
 
-        head_out = self.modality_heads(z_v, z_a)
+        head_out = self.modality_heads(
+            z_v, z_a,
+            visual_missing=visual_missing,
+            audio_missing=audio_missing,
+        )
 
         z_v_bar = z_v.mean(dim=1)
         z_a_bar = z_a.mean(dim=1)
+        if visual_missing is not None:
+            z_v_bar = z_v_bar.masked_fill(visual_missing.reshape(-1, 1).to(frames.device) >= 0.5, 0.0)
+        if audio_missing is not None:
+            z_a_bar = z_a_bar.masked_fill(audio_missing.reshape(-1, 1).to(frames.device) >= 0.5, 0.0)
 
         fusion_out = self.fusion_classifier(
             z_v_bar=z_v_bar,
             z_a_bar=z_a_bar,
-            sync_features=sync_features,
+            sync_features=sync_features if self.use_sync else None,
             visual_missing=visual_missing,
             audio_missing=audio_missing,
         )
@@ -196,9 +212,16 @@ def train_fixed_fusion(
     logger.info("Model parameters: %d (%.2f M)", n_params, n_params / 1e6)
 
     loss_cfg = train_config.loss
+    loss_fn = CombinedLoss(
+        alpha=loss_cfg.alpha,
+        beta=0.0,
+        gamma=0.0,
+        eta=0.0,
+        label_smoothing=getattr(loss_cfg, "label_smoothing", 0.0),
+    )
     result = run_training(
         model=model,
-        loss_fn=CombinedLoss(alpha=loss_cfg.alpha, beta=0.0, gamma=0.0, eta=0.0),
+        loss_fn=loss_fn,
         stage="fixed_fusion",
         run_name=f"fixed_fusion_{fusion_mode}",
         data_config_path=data_config_path,
@@ -215,7 +238,7 @@ def train_fixed_fusion(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train fixed fusion baseline")
     parser.add_argument(
-        "--mode", choices=["equal_weight", "concat", "learned_global"],
+        "--mode", choices=["equal_weight", "concat", "learned_global", "learned_fixed"],
         default="equal_weight",
     )
     parser.add_argument("--config", type=str, default=None)
