@@ -358,6 +358,8 @@ class CombinedLoss(nn.Module):
             - ``"L_con"``: contrastive loss
             - ``"L_bal"``: balance regularization
         """
+        if isinstance(target, dict):
+            target = target["target"]
         target = target.float().view(-1, 1)
         smoothed_target = target
         if self.label_smoothing > 0.0:
@@ -426,4 +428,5 @@ class CombinedLoss(nn.Module):
             "L_rel": l_rel,
             "L_con": l_con,
             "L_bal": l_bal,
+            "eta": torch.tensor(effective_eta, dtype=torch.float32),
         }

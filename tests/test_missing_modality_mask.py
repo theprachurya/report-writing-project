@@ -300,3 +300,52 @@ def test_distillation_teacher_eval_mode_and_no_grad() -> None:
     for p in distiller.teacher.parameters():
         assert not p.requires_grad
 
+
+def test_unimodal_audio_positional_forward() -> None:
+    """UnimodalAudioModel supports standard positional forward call audio_model(mel_spec)."""
+    from src.train.train_unimodal import UnimodalAudioModel, UnimodalVisualModel
+
+    model_a = UnimodalAudioModel()
+    mel = torch.zeros(2, 1, 80, 201)
+    out_a = model_a(mel)
+    assert "logit_f" in out_a
+    assert out_a["p_f"].shape == (2, 1)
+
+    model_v = UnimodalVisualModel()
+    frames = torch.zeros(2, 16, 3, 160, 160)
+    out_v = model_v(frames)
+    assert "logit_f" in out_v
+    assert out_v["p_f"].shape == (2, 1)
+
+    with pytest.raises(ValueError, match="frames is required"):
+        model_v(None)
+
+
+def test_distillation_trainer_with_missing_modalities() -> None:
+    """DistillationTrainer passes missingness flags to models during train_step."""
+    from src.train.distillation import DistillationTrainer
+
+    class DummyBranch(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(1, 1)
+
+        def forward(self, frames=None, mel_spec=None, visual_missing=None, audio_missing=None, **kwargs):
+            vm = visual_missing if visual_missing is not None else torch.zeros(1, 1)
+            return {"logit_f": self.linear(vm)}
+
+    teacher = DummyBranch()
+    student = DummyBranch()
+    distiller = DistillationTrainer(teacher, student)
+
+    batch = {
+        "frames": torch.zeros(2, 16, 3, 160, 160),
+        "mel_spec": torch.zeros(2, 1, 80, 201),
+        "visual_missing": torch.ones(2, 1),
+        "audio_missing": torch.zeros(2, 1),
+        "target": torch.tensor([[1.0], [0.0]]),
+    }
+    loss_dict = distiller.train_step(batch)
+    assert "total" in loss_dict
+    assert torch.isfinite(loss_dict["total"])
+

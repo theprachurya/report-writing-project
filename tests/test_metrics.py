@@ -259,6 +259,24 @@ def test_cross_dataset_validation_and_dfdc_warning() -> None:
         assert res.transfer_type == "visual_only"
 
 
+def test_mlaad_cross_dataset_is_audio_only() -> None:
+    """MLAAD-tiny labels permit audio-only transfer metrics, not paired AV claims."""
+    targets = np.array([0, 0, 1, 1])
+    probabilities = np.array([0.1, 0.2, 0.8, 0.9])
+    compatibility = check_label_compatibility("fakeavceleb", "MLAAD-tiny")
+    result = evaluate_cross_dataset(
+        targets,
+        probabilities,
+        source_dataset="fakeavceleb",
+        target_dataset="MLAAD-tiny",
+        threshold=0.5,
+    )
+    assert compatibility["audio_claim_allowed"] is True
+    assert compatibility["visual_transfer_valid"] is False
+    assert result.transfer_type == "audio_only"
+    assert result.metrics["roc_auc"] == 1.0
+
+
 def test_cross_manipulation_single_class_and_missing_family() -> None:
     """evaluate_cross_manipulation handles single-class family subsets and warns on missing held-out."""
     targets = np.array([0, 1, 1, 1])

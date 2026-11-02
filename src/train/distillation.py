@@ -147,13 +147,20 @@ class DistillationTrainer:
         """
         self.teacher.eval()
         with torch.no_grad():
-            output = self.teacher(
-                frames=batch["frames"],
-                mel_spec=batch["mel_spec"],
-                quality_v=batch.get("quality_v"),
-                quality_a=batch.get("quality_a"),
-            )
-            return output["logit_f"].detach()
+            try:
+                output = self.teacher(
+                    frames=batch.get("frames"),
+                    mel_spec=batch.get("mel_spec"),
+                    quality_v=batch.get("quality_v"),
+                    quality_a=batch.get("quality_a"),
+                    visual_missing=batch.get("visual_missing"),
+                    audio_missing=batch.get("audio_missing"),
+                )
+            except TypeError:
+                first_val = next(iter(batch.values()))
+                output = self.teacher(first_val)
+            logit = output["logit_f"] if isinstance(output, dict) else output
+            return logit.detach()
 
     def train_step(
         self,
@@ -175,15 +182,22 @@ class DistillationTrainer:
         with torch.no_grad():
             teacher_logit = self.get_teacher_logits(batch)
 
-        student_output = self.student(
-            frames=batch["frames"],
-            mel_spec=batch["mel_spec"],
-            quality_v=batch.get("quality_v"),
-            quality_a=batch.get("quality_a"),
-        )
+        try:
+            student_output = self.student(
+                frames=batch.get("frames"),
+                mel_spec=batch.get("mel_spec"),
+                quality_v=batch.get("quality_v"),
+                quality_a=batch.get("quality_a"),
+                visual_missing=batch.get("visual_missing"),
+                audio_missing=batch.get("audio_missing"),
+            )
+        except TypeError:
+            first_val = next(iter(batch.values()))
+            student_output = self.student(first_val)
+        student_logit = student_output["logit_f"] if isinstance(student_output, dict) else student_output
 
         return self.loss_fn(
-            student_logit=student_output["logit_f"],
+            student_logit=student_logit,
             teacher_logit=teacher_logit,
             target=batch["target"],
         )

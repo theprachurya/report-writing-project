@@ -29,6 +29,15 @@ Set either dataset root only if you have access to that dataset. The code uses t
 
 See [`docs/DATASETS.md`](docs/DATASETS.md) for alternative dataset candidates, modality caveats, access notes, and storage planning for the Linux environment.
 
+The repository includes a local browser interface alongside its research CLI and notebook. FakeAVCeleb is already present in the local data area on the current machine. MLAAD-tiny is an optional audio-only external test set. Its generated files are non-commercial, and its bona-fide audio keeps the separate M-AILABS license. The downloader is an explicit command and defaults to ignored `data/raw/` (the root is configurable):
+
+```bash
+python -m pip install -r requirements-data.txt
+python scripts/download_mlaad_tiny.py  # downloads the pinned German slice by default
+```
+
+The German slice is reserved for an exploratory external audio-only transfer probe. FakeAVCeleb's audio branch is trained against the clip-level fake label, while MLAAD-tiny labels bona-fide versus spoof audio; interpret these as different label semantics. MLAAD-tiny is not added to AV training manifests and must not be combined with paired AV results.
+
 Do not put dataset files under tracked source directories or commit them. After access is granted, set roots outside the repository, for example:
 
 ```powershell
@@ -51,13 +60,33 @@ You can also set `datasets.fakeavceleb.root` in `configs/data_config.yaml`. Keep
 
 ## Run the project
 
+### Open the local review interface
+
+Start the browser app with a full audio-visual checkpoint:
+
+```bash
+python scripts/serve_web.py --checkpoint artifacts/checkpoints/reliability_fusion/best_model.pt
+```
+
+Then open `http://127.0.0.1:7860`. The server binds to the local machine by default. It scores the first configured 2-second window, chooses its decision threshold from the FakeAVCeleb validation split, and caches that threshold for the checkpoint and manifest. The first prediction can take longer while this threshold is fit. Upload limits are in `configs/web_app_config.yaml`; the app preprocesses each upload in a temporary directory and removes it after scoring. Use a full AV checkpoint; unimodal audio checkpoints cannot produce a fused prediction.
+
 1. Build the source table and identity-disjoint split manifests, then inspect the audit report:
 
    ```powershell
    python scripts/run_data_audit.py --config configs/data_config.yaml
    ```
 
-   The command writes `manifests/source_table.csv`, `manifests/splits/{train,val,test}_manifest.csv`, and `manifests/data_audit_report.json`. Training reads these manifests and never creates or changes a split.
+   This audit writes `manifests/source_table.csv`, the standard train/validation/test manifests, and `manifests/data_audit_report.json`. Training reads these manifests and never creates or changes a split.
+
+   For a separate cross-manipulation experiment, freeze the configured `faceswap` family before training and build its manifests. The current split has 27 train, 4 validation, and 5 seen-test identities, with 464 held-out identities. Treat this run as exploratory because the seen-identity pool is too small for strong confirmatory generalization claims; inspect `split_metadata.json` before training:
+
+   ```bash
+   python scripts/build_cross_manip_split.py
+   python -m src.train.train_reliability_fusion --manifest-dir manifests/splits/cross_manipulation_faceswap
+   python scripts/run_full_evaluation.py --manifest-dir manifests/splits/cross_manipulation_faceswap --checkpoint <cross-manipulation-checkpoint>
+   ```
+
+   The cross-manipulation command writes a separate directory containing its train/validation/held-out manifests, a seen-family test manifest, and `split_metadata.json`; it leaves the standard in-domain split intact.
 
 2. Train the unimodal baselines, followed by fixed fusion and reliability fusion:
 
@@ -82,10 +111,18 @@ You can also set `datasets.fakeavceleb.root` in `configs/data_config.yaml`. Keep
 
    ```powershell
    python -m pytest tests -q
-   python scripts/run_data_audit.py --output-dir reports/fixture-audit
+   python scripts/run_data_audit.py --fixture-only --output-dir reports/fixture-audit
    ```
 
 The fixture audit checks decode and feature contracts only; it does not generate dataset manifests or train a model. Cross-manipulation, cross-dataset, and controlled degradation experiments remain separate study runs and are not included in the clean in-domain evaluation command.
+
+5. Run the optional MLAAD-tiny audio-only transfer evaluation with an explicit trained checkpoint:
+
+   ```bash
+   python scripts/run_mlaad_audio_eval.py --checkpoint artifacts/checkpoints/unimodal_audio/best_model.pt
+   ```
+
+   The script chooses its threshold from the FakeAVCeleb validation audio head, does not use FakeAVCeleb's locked test split, and does not retune on MLAAD-tiny. Add `--limit-groups 16` only for an inference smoke run; limited output is not a benchmark result. Checkpoints currently present in this workspace are one-epoch development artifacts, not final reported models.
 
 ## Data and modeling notes
 
@@ -93,6 +130,22 @@ The fixture audit checks decode and feature contracts only; it does not generate
 - Face crops use the configured OpenCV Haar detector as a local, no-weight-download baseline. Landmark alignment and a RetinaFace/MediaPipe backend are not currently implemented; set expectations accordingly when reporting experiments.
 - PyTorch/torchvision pretrained weights are optional. If torchvision or its weights are unavailable, the visual encoder logs and uses its compact convolutional fallback; record that configuration with results.
 - Feature caches/checkpoints/reports are local derived artifacts and are gitignored. Split CSVs are small metadata manifests and should be reviewed/versioned without including licensed media.
+
+## Assessment material
+
+### PBL-2 (Assessed 16 Oct 2026 — 20 Marks)
+- [PBL-2 IEEE conference paper rough draft (LaTeX)](docs/pbl2_ieee_draft.tex) · [print-ready PDF](docs/pbl2_ieee_draft.pdf)
+- [PBL-2 final project report (Word)](FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.docx) · [print-ready PDF](FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.pdf)
+- [PBL-2 report draft (Word)](docs/report-writing-paper.docx) · [extracted text](docs/pbl2_docx_extracted.md)
+
+### PBL-3 (Assessed 27 Oct 2026 — 20 Marks)
+- [PBL-3 comprehensive project report (Markdown)](PBL-3/PBL3_Report.md) · [Word document](PBL-3/PBL3_Report.docx) · [print-ready PDF](PBL-3/PBL3_Report.pdf)
+- [PBL-3 result analysis and final report draft (Markdown)](docs/PBL3_Results_Analysis_and_Final_Report_Draft.md) · [Word document](docs/PBL3_Results_Analysis_and_Final_Report_Draft.docx) · [print-ready PDF](docs/PBL3_Results_Analysis_and_Final_Report_Draft.pdf)
+- [PBL-3 presentation (HTML slides)](docs/PBL3_Presentation.html) · [print-ready PDF slides](docs/PBL3_Presentation.pdf) · [speaker outline](docs/PBL3_Presentation_Outline.md)
+
+### Final Report & Viva with Demo (Scheduled 10 Nov 2026 — 20 Marks)
+- [Complete project report & Turnitin plagiarism guide (Markdown)](docs/FINAL_PROJECT_REPORT_AND_PLAGIARISM_GUIDE.md) · [Word document](docs/FINAL_PROJECT_REPORT_AND_PLAGIARISM_GUIDE.docx) · [print-ready PDF](docs/FINAL_PROJECT_REPORT_AND_PLAGIARISM_GUIDE.pdf)
+- [Final viva defense & live demo execution guide (Markdown)](docs/FINAL_VIVA_AND_DEMO_GUIDE.md) · [Word document](docs/FINAL_VIVA_AND_DEMO_GUIDE.docx) · [print-ready PDF](docs/FINAL_VIVA_AND_DEMO_GUIDE.pdf)
 
 ## Repository guidance
 

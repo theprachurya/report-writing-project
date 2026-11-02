@@ -1,0 +1,10 @@
+# Local review interface settings. Inference uses the model/data/evaluation configs.
+server:
+  host: "127.0.0.1"
+  port: 7860
+  max_upload_mb: 150
+  max_clip_duration_s: 8.0
+  max_frame_pixels: 2073600
+  allowed_extensions: [".mp4", ".mov", ".mkv", ".avi", ".webm"]
+  threshold_cache_dir: "reports/web_app"
+

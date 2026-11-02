@@ -7,6 +7,7 @@ fallback. See AGENTS.md for build order.
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -14,6 +15,30 @@ from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=16)
+def _get_torchaudio_mel_transform(
+    sample_rate: int,
+    n_fft: int,
+    win_length: int,
+    hop_length: int,
+    n_mels: int,
+    f_min: float,
+    f_max: float,
+):
+    """Instantiate and cache torchaudio MelSpectrogram transform to avoid re-creation overhead."""
+    import torchaudio
+    return torchaudio.transforms.MelSpectrogram(
+        sample_rate=sample_rate,
+        n_fft=n_fft,
+        win_length=win_length,
+        hop_length=hop_length,
+        n_mels=n_mels,
+        f_min=f_min,
+        f_max=f_max,
+        power=2.0,
+    )
 
 
 @dataclass
@@ -134,7 +159,7 @@ def _compute_torchaudio(
 
     n_fft = max(win_length, 512)  # At least 512 for reasonable frequency resolution
 
-    transform = torchaudio.transforms.MelSpectrogram(
+    transform = _get_torchaudio_mel_transform(
         sample_rate=sample_rate,
         n_fft=n_fft,
         win_length=win_length,
@@ -142,7 +167,6 @@ def _compute_torchaudio(
         n_mels=n_mels,
         f_min=f_min,
         f_max=f_max,
-        power=2.0,
     )
     mel = transform(tensor.float())  # (1, n_mels, T)
     # Ensure float32 precision for torch.log to prevent float16 underflow/NaN
@@ -194,6 +218,7 @@ def _mel_to_hz(mel: float) -> float:
     return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
 
 
+@functools.lru_cache(maxsize=16)
 def _mel_filterbank(
     n_mels: int,
     n_fft: int,

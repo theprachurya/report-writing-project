@@ -162,3 +162,45 @@ def test_manifest_dataset_re_derives_validity_mask_on_frame_drop(tmp_path) -> No
     )
     item = dataset[0]
     assert item["quality_v"].shape == (7,)
+
+
+def test_manifest_dataset_handles_string_clip_fake(tmp_path) -> None:
+    """ManifestAVDataset safely converts string boolean labels ('False', 'True', '0', '1')."""
+    clip_id = "test-string-clip"
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    key = hashlib.sha256(f"fakeavceleb:{clip_id}".encode("utf-8")).hexdigest() + ".npz"
+    np.savez_compressed(
+        cache_dir / key,
+        frames=np.full((16, 160, 160, 3), 128, dtype=np.uint8),
+        mel_spec=np.zeros((80, 201), dtype=np.float32),
+        quality_v=np.zeros(7, dtype=np.float32),
+        quality_a=np.zeros(5, dtype=np.float32),
+        visual_missing=np.float32(0),
+        audio_missing=np.float32(0),
+    )
+    manifest_path = tmp_path / "manifest_str.csv"
+    pd.DataFrame([
+        {
+            "clip_id": clip_id,
+            "dataset": "fakeavceleb",
+            "file_path": "fake.mp4",
+            "source_identity": "person-1",
+            "clip_fake": "False",
+        }
+    ]).to_csv(manifest_path, index=False)
+
+    dataset = ManifestAVDataset(
+        manifest_path,
+        {"fakeavceleb": tmp_path},
+        cache_dir,
+        load_data_config(),
+    )
+    # Ensure pandas object dtype
+    dataset.rows["clip_fake"] = ["False"]
+    item = dataset[0]
+    assert item["target"].item() == 0.0
+
+    dataset.rows["clip_fake"] = ["True"]
+    item = dataset[0]
+    assert item["target"].item() == 1.0

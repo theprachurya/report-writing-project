@@ -114,7 +114,8 @@ class Trainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         # Tracking
-        self.best_metric = -float("inf")
+        self.is_loss_metric = "loss" in self.metric_for_best.lower()
+        self.best_metric = float("inf") if self.is_loss_metric else -float("inf")
         self.patience_counter = 0
         self.global_step = 0
         self.freeze_encoder_epochs = 0
@@ -183,7 +184,8 @@ class Trainer:
             total_loss += losses["total"].item()
             for k, v in losses.items():
                 if k != "total":
-                    loss_components[k] = loss_components.get(k, 0.0) + v.item()
+                    val = v.item() if isinstance(v, torch.Tensor) else float(v)
+                    loss_components[k] = loss_components.get(k, 0.0) + val
             n_batches += 1
 
         # Average metrics
@@ -327,8 +329,19 @@ class Trainer:
                 self._save_checkpoint(epoch, val_metrics, config_dict)
 
             if self.save_best:
-                current_metric = val_metrics.get(self.metric_for_best, -val_metrics["val_loss"])
-                if current_metric > self.best_metric + self.min_delta:
+                if self.metric_for_best in val_metrics:
+                    current_metric = float(val_metrics[self.metric_for_best])
+                    improved = (
+                        current_metric < self.best_metric - self.min_delta
+                        if self.is_loss_metric
+                        else current_metric > self.best_metric + self.min_delta
+                    )
+                else:
+                    # Fallback to minimizing validation loss
+                    current_metric = float(val_metrics.get("val_loss", 0.0))
+                    improved = current_metric < self.best_metric - self.min_delta
+
+                if improved:
                     self.best_metric = current_metric
                     self.patience_counter = 0
                     self._save_checkpoint(epoch, val_metrics, config_dict, is_best=True)

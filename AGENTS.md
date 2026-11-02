@@ -62,13 +62,15 @@ convenience, even under a tight deadline:
 docs/PROJECT_BRIEF.md   Canonical spec — architecture, math, datasets, protocol, timeline
 data/                    Local, gitignored dataset root (raw/, processed/, cache/)
 manifests/               Versioned split + source-table CSVs (small, always committed)
-configs/                 YAML configs for data/model/train/eval — fill in fields, keep code config-driven
+configs/                 YAML configs for data/model/train/eval/web — keep code config-driven
 src/decode/              Raw video/audio decoding
 src/preprocess/          Face/audio feature extraction, quality features, alignment, augmentation
 src/models/              Encoders, projector, sync features, reliability estimator, fusion, full model
+src/inference/           Local single-clip inference service shared by the browser interface
 src/train/               Losses + staged training scripts (unimodal -> fixed fusion -> reliability fusion -> distillation)
 src/evaluate/            Metrics, calibration, degradation suite, cross-manipulation/cross-dataset eval, efficiency
 src/utils/               Manifest building, splitting, hashing, seeding, logging, config loading
+web/                     Local browser interface assets served by scripts/serve_web.py
 tests/                   Unit tests — see Section 5, write these alongside the code they test
 notebooks/               Manual audit notebook(s)
 reports/                 Generated output (gitignored except final figures)

@@ -11,6 +11,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from src.utils.splitting import _as_binary_bool
+
 
 def dataset_roots_from_config(data_config: Any) -> dict[str, Path]:
     """Return configured dataset roots that resolve to existing local folders."""
@@ -69,6 +71,9 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
         self.training = training
         self.modality_dropout_prob = float(modality_dropout_prob)
         self.augmentation_config = augmentation_config or {}
+        norm = self.data_config.visual_normalization
+        self._vis_mean = np.asarray(norm.mean, dtype=np.float32).reshape(1, 1, 1, 3)
+        self._vis_std = np.asarray(norm.std, dtype=np.float32).reshape(1, 1, 1, 3)
 
     def __len__(self) -> int:
         """Return the number of clips in this manifest."""
@@ -219,10 +224,7 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
                 else:
                     audio_missing = 1.0
 
-        normalization = self.data_config.visual_normalization
-        mean = np.asarray(normalization.mean, dtype=np.float32).reshape(1, 1, 1, 3)
-        std = np.asarray(normalization.std, dtype=np.float32).reshape(1, 1, 1, 3)
-        frames = ((frames.astype(np.float32) / 255.0) - mean) / std
+        frames = ((frames.astype(np.float32) / 255.0) - self._vis_mean) / self._vis_std
         frames = frames.astype(np.float32)
         if visual_missing >= 0.5:
             frames = np.zeros_like(frames)
@@ -236,5 +238,5 @@ class ManifestAVDataset(Dataset[dict[str, torch.Tensor]]):
             "quality_a": torch.from_numpy(np.asarray(quality_a, dtype=np.float32)),
             "visual_missing": torch.tensor([visual_missing], dtype=torch.float32),
             "audio_missing": torch.tensor([audio_missing], dtype=torch.float32),
-            "target": torch.tensor([float(row["clip_fake"])], dtype=torch.float32),
+            "target": torch.tensor([float(_as_binary_bool(row["clip_fake"]))], dtype=torch.float32),
         }

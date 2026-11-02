@@ -75,8 +75,9 @@ def build_train_val_loaders(
     if not isinstance(balance_cfg, dict):
         balance_cfg = vars(balance_cfg)
     if balance_cfg.get("balanced_sampling", False):
-        labels = train_set.rows["clip_fake"].astype(int).to_numpy().copy()
-        labels_tensor = torch.as_tensor(labels)
+        from src.utils.splitting import _as_binary_bool
+        labels = [int(_as_binary_bool(v)) for v in train_set.rows["clip_fake"]]
+        labels_tensor = torch.as_tensor(labels, dtype=torch.long)
         class_counts = torch.bincount(labels_tensor, minlength=2).clamp_min(1)
         weights = (1.0 / class_counts[labels_tensor]).double()
         num_samples = int(balance_cfg.get("samples_per_epoch") or len(weights))

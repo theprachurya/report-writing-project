@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip SHA-256 hashing during source-manifest creation (faster; weaker duplicate audit).",
     )
+    parser.add_argument(
+        "--fixture-only",
+        action="store_true",
+        help="Skip configured dataset roots and run only the permitted local fixture smoke check.",
+    )
     return parser.parse_args()
 
 
@@ -172,7 +177,11 @@ def main() -> int:
 
     # Resolve only user-provided local dataset locations from CLI or config.
     dataset_roots: dict[str, Path] = {}
-    if args.dataset_root:
+    if args.fixture_only and args.dataset_root:
+        raise ValueError("--fixture-only cannot be combined with --dataset-root")
+    if args.fixture_only:
+        logger.info("Fixture-only mode: configured dataset roots will not be read or modified.")
+    elif args.dataset_root:
         dataset_roots["fakeavceleb"] = Path(args.dataset_root).expanduser().resolve()
     else:
         for name, dataset in cfg.datasets.items():

@@ -29,7 +29,7 @@ class CrossDatasetResult:
     target_dataset:
         Dataset being evaluated on.
     transfer_type:
-        ``"full_av"`` or ``"visual_only"``.
+        ``"full_av"``, ``"visual_only"``, or ``"audio_only"``.
     metrics:
         Discrimination metrics (AUROC with no threshold retuning).
     compatibility_checks:
@@ -47,6 +47,9 @@ _AUDIO_VERIFIED_DATASETS = {"fakeavceleb"}
 
 # Datasets where audio labels are NOT verified for deepfake claims
 _AUDIO_UNVERIFIED_DATASETS = {"dfdc"}
+
+# MLAAD-tiny contains labeled audio-only bona-fide and TTS-spoof clips.
+_AUDIO_ONLY_VERIFIED_DATASETS = {"mlaad_tiny", "mlaad"}
 
 
 def check_label_compatibility(
@@ -74,10 +77,15 @@ def check_label_compatibility(
 
     checks: dict[str, bool] = {}
 
-    target_lower = target_dataset.lower()
-    checks["visual_transfer_valid"] = True  # Visual transfer always valid
+    target_lower = target_dataset.lower().replace("-", "_")
+    audio_only = target_lower in _AUDIO_ONLY_VERIFIED_DATASETS
+    checks["visual_transfer_valid"] = not audio_only
+    checks["audio_only_dataset"] = audio_only
 
-    if "dfdc" in target_lower or target_lower in _AUDIO_UNVERIFIED_DATASETS:
+    if audio_only:
+        checks["audio_labels_verified"] = True
+        checks["audio_claim_allowed"] = True
+    elif "dfdc" in target_lower or target_lower in _AUDIO_UNVERIFIED_DATASETS:
         if not audio_audited:
             msg = (
                 f"Dataset '{target_dataset}' audio labels are NOT verified for deepfake claims. "
@@ -153,7 +161,10 @@ def evaluate_cross_dataset(
     )
 
     # Determine transfer type
-    if compatibility.get("audio_claim_allowed", False):
+    normalized_target = target_dataset.lower().replace("-", "_")
+    if normalized_target in _AUDIO_ONLY_VERIFIED_DATASETS:
+        transfer_type = "audio_only"
+    elif compatibility.get("audio_claim_allowed", False):
         transfer_type = "full_av"
     else:
         transfer_type = "visual_only"

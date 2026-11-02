@@ -9,13 +9,31 @@ See AGENTS.md for build order.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_local_cascade_storage = threading.local()
+
+
+def _get_cached_cascade(path: str) -> cv2.CascadeClassifier:
+    """Thread-local cache for CascadeClassifier instances to prevent C++ thread contention."""
+    if not hasattr(_local_cascade_storage, "cache"):
+        _local_cascade_storage.cache = {}
+    if path not in _local_cascade_storage.cache:
+        cascade = cv2.CascadeClassifier(path)
+        if cascade.empty():
+            logger.warning(
+                "Haar cascade not found at %s; face detection will fail.",
+                path,
+            )
+        _local_cascade_storage.cache[path] = cascade
+    return _local_cascade_storage.cache[path]
 
 
 @dataclass
@@ -205,24 +223,28 @@ class FaceExtractor:
         self.detector_name = detector
         self._detector = self._init_detector(detector)
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Exclude unpicklable C++ CascadeClassifier from pickle serialization."""
+        state = self.__dict__.copy()
+        state["_detector"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore instance state and re-initialize backend detector."""
+        self.__dict__.update(state)
+        self._detector = self._init_detector(self.detector_name)
+
     def _init_detector(self, name: str) -> object:
-        """Initialize the chosen face detection backend."""
+        """Initialize the chosen face detection backend, caching cascades per-thread."""
         if name in {"opencv_haar", "opencv_dnn"}:
-            # OpenCV's built-in Haar cascade is the portable implemented backend.
             cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            cascade = cv2.CascadeClassifier(cascade_path)
-            if cascade.empty():
-                logger.warning(
-                    "Haar cascade not found at %s; face detection will fail.",
-                    cascade_path,
-                )
-            return cascade
+            return _get_cached_cascade(cascade_path)
         elif name in ("retinaface", "mediapipe"):
             logger.warning(
                 "Detector '%s' is not installed; using OpenCV Haar cascade fallback.", name
             )
             cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            return cv2.CascadeClassifier(cascade_path)
+            return _get_cached_cascade(cascade_path)
         else:
             raise ValueError(f"Unknown face detector: {name}")
 

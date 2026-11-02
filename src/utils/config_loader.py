@@ -419,6 +419,7 @@ class EvalConfig:
     cross_dataset: dict[str, Any] = field(default_factory=dict)
     efficiency: dict[str, Any] = field(default_factory=dict)
     reliability_diagnostics: dict[str, Any] = field(default_factory=dict)
+    mlaad_tiny: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Dataclass construction helpers ───────────────────────────────────────────

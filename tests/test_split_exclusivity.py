@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.utils.splitting import (
@@ -114,7 +115,9 @@ def test_cross_manipulation_holdout_exclusivity(tmp_path: Path) -> None:
 
     assert "faceswap" not in train_fams, "Held-out family found in train set!"
     assert "faceswap" not in val_fams, "Held-out family found in val set!"
-    assert test_held_fams == {"faceswap"}, "test_held_out should contain only the held-out family"
+    assert test_held_fams == {"real", "faceswap"}, "held-out cohort should include real controls"
+    assert set(splits["test_held_out"]["clip_fake"].map(bool)) == {False, True}
+    assert set(splits["test_held_out"]["is_held_out_family"]) == {False, True}
 
     # Held-out family's identities must NEVER appear in train or val
     held_out_ids = set(splits["test_held_out"]["source_identity"].unique())
@@ -122,6 +125,8 @@ def test_cross_manipulation_holdout_exclusivity(tmp_path: Path) -> None:
     val_ids = set(splits["val"]["source_identity"].unique())
     assert held_out_ids.isdisjoint(train_ids), "Held-out identities leaked into train set!"
     assert held_out_ids.isdisjoint(val_ids), "Held-out identities leaked into val set!"
+    saved_test = pd.read_csv(tmp_path / "cross_manip" / "test_manifest.csv")
+    assert set(saved_test["manipulation_family"]) == {"real", "faceswap"}
 
 
 def test_split_with_string_clip_fake(tmp_path: Path) -> None:

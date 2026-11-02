@@ -1,6 +1,6 @@
 # Dataset access and storage plan
 
-**Reviewed:** 2026-10-15
+**Reviewed:** 2026-10-26
 
 **Project:** Reliability-Aware Audio-Visual Fusion for Generalizable Deepfake Detection
 
@@ -10,14 +10,15 @@ This note records the project’s current dataset roles, possible additions, acc
 
 | Dataset | Project role | Current notes |
 |---|---|---|
-| [FakeAVCeleb](https://github.com/DASH-Lab/FakeAVCeleb) | Main multimodal benchmark | A project member reports that access has been granted. The exact release, package layout, license terms, labels, and disk footprint still need to be recorded from the authorized copy. Access for one member does not grant access to other users. |
+| [FakeAVCeleb](https://github.com/DASH-Lab/FakeAVCeleb) | Main multimodal benchmark | Present locally under `data/raw/FakeAVCeleb_v1.2` (21,544 video files; the source table also has 21,544 rows). The checked-in source and identity-disjoint split manifests are built from this copy. The official page still requires a request and agreement; local presence does not grant access to others. |
 | [DFDC](https://ai.meta.com/datasets/dfdc/) | Optional visual pretraining or visual-transfer evaluation | Keep it visual-only unless the audio provenance and labels are separately verified. Meta describes a 124k-video full version and requires an AWS account and IAM access setup. |
+| [MLAAD-tiny](https://huggingface.co/datasets/mueller91/MLAAD-tiny) | Exploratory audio-only out-of-domain transfer probe | The pinned public German slice is downloaded to ignored `data/raw/MLAAD-tiny`. It has 1,500 spoof files and 1,320 bona-fide files; 171 spoof metadata rows do not have their source recording in this release. The loader retains these spoof files, includes each available bona-fide file once, and bootstraps by source ID. The downloader preserves both license files. Spoof audio is CC BY-NC 4.0; bona-fide M-AILABS audio retains the license in `original/LICENSE`. Target bona-fide/spoof labels differ from the FakeAVCeleb audio branch's `clip_fake` training target, so this is a label-semantic transfer probe, not a direct same-task result or paired AV evidence. |
 
 Request-form access, a public code repository, or a no-cost download should not be treated as an unrestricted media license. Read the dataset’s own terms before downloading, processing, or sharing anything. A repository’s code license does not automatically apply to its dataset.
 
 ## Candidate alternatives
 
-These are candidates to investigate, not datasets already approved for training. “AV” means the source documents describe manipulations in audio, video, or both. Audio-only and visual-only results must remain distinct from the project’s paired audio-visual evaluation.
+These are candidates to investigate, not datasets already approved for training. “AV” means the source documents describe manipulations in audio, video, or both. Audio-only and visual-only results must remain distinct from the project’s paired audio-visual evaluation. The closest AV candidates below were not downloaded because obtaining them requires accepting additional dataset agreements.
 
 | Dataset | Modalities and possible role | Access and storage notes | Priority for this project |
 |---|---|---|---|
@@ -27,7 +28,6 @@ These are candidates to investigate, not datasets already approved for training.
 | [Celeb-DF v2](https://cse.buffalo.edu/~siweilyu/celeb-deepfakeforensics) | Visual face-swap transfer evaluation | Follow the project’s access instructions and terms. It is not a paired fake-audio dataset. | Optional visual benchmark |
 | [KoDF](https://github.com/deepbrainai-research/kodf) | Visual-transfer evaluation with Korean video content | Access and the currently distributed release are governed by the official project instructions. Treat as visual-only unless audio manipulation labels are independently established. | Optional domain-diversity benchmark |
 | [DeeperForensics-1.0](https://github.com/EndlessSora/DeeperForensics-1.0) | Visual robustness under real-world perturbations | Non-commercial research terms and request approval apply. Its official download guide lists about **284 GB**, so the full release does not fit this machine. | Defer unless external storage is available |
-| [MLAAD-tiny](https://huggingface.co/datasets/mueller91/MLAAD-tiny) | Audio-only branch development or out-of-domain audio evaluation | The dataset card lists **3.54 GB** and CC BY-NC 4.0. Check the card and included notices for source-specific conditions. It cannot provide a paired AV result. | Best small audio candidate |
 | [WaveFake](https://zenodo.org/records/5642694) | Audio-only cross-generator evaluation | The record lists **28.9 GB** for the generated-audio archive and a CC BY-SA 4.0 license. Review the datasheet and source-data conditions; keep its result separate from AV metrics. | Optional if space remains |
 | [ASVspoof 5](https://zenodo.org/records/14498691) | Audio-only spoof/deepfake research | Zenodo lists **142.3 GB** and asks users to read the README and license. The full corpus exceeds the Linux disk capacity. | Do not place the full set on this machine |
 
@@ -35,11 +35,11 @@ The catalog favors datasets with official project, paper, or archive pages. Acce
 
 ## Disk plan for the Linux environment
 
-The available disk is approximately **130 GB total**, not 130 GB of dataset space. Until the actual free-space report is known, cap dataset media and derived caches at roughly **70–80 GB combined**, leaving room for Linux, environments, temporary decode files, checkpoints, and reports.
+On the current project machine (2026-10-26), `df -h .` reports about **39 GiB available** on a 145 GiB filesystem. This is a point-in-time measurement, not a portable capacity guarantee. The existing raw data tree is about 13 GiB and its feature cache is about 2.8 GiB. Recheck after the MLAAD-tiny download and before any further acquisition; keep room for environments, temporary decode files, checkpoints, and reports.
 
 1. Check free space with `df -h` and measure each downloaded and extracted dataset with `du -sh`.
 2. Check both archive size and extracted size before downloading. Extraction may temporarily require both copies at once.
-3. Start with FakeAVCeleb. Add at most one additional AV dataset after measuring it; add MLAAD-tiny only if the remaining budget allows. Prefer an external drive for larger collections.
+3. FakeAVCeleb is the paired AV benchmark. The selected MLAAD-tiny German slice is only for audio-only external evaluation; the full tiny dataset card lists 3.54 GB. LAV-DF and AV-Deepfake1M are closer paired AV additions, but their terms require affirmative agreement; do not fetch them automatically.
 4. Do not retain duplicate raw, extracted, and uncompressed frame/audio copies without a measured need. Treat feature caches as storage costs too; make them reproducible and disposable.
 5. If a subset is necessary, select it deterministically, record the selection seed and source IDs, and create versioned manifests. Never make ad hoc splits inside training code.
 

@@ -140,7 +140,7 @@ def compute_visual_quality(
             crop_np = crop_np.astype(np.uint8)
 
         gray = cv2.cvtColor(crop_np, cv2.COLOR_RGB2GRAY)
-        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_32F).var())
         blur_values.append(lap_var)
 
         luminances.append(float(gray.mean()))

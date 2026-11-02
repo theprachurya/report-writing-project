@@ -48,6 +48,11 @@ class SyncFeatureExtractor(nn.Module):
         super().__init__()
         self.offsets = offsets or [-2, -1, 0, 1, 2]
         self.output_dim = output_dim
+        self.register_buffer(
+            "offsets_tensor",
+            torch.tensor(self.offsets, dtype=torch.float32),
+            persistent=False,
+        )
 
     def _compute_offset_similarity(
         self,
@@ -138,8 +143,7 @@ class SyncFeatureExtractor(nn.Module):
         # projector parameters; it serves as an auxiliary, discrete forensic feature
         # for downstream modules (reliability estimator and classifier) per Section 7.1/7.3.
         max_offset = float(max(abs(o) for o in self.offsets) or 1)
-        offsets_tensor = torch.tensor(self.offsets, device=device, dtype=torch.float32)
-        best_offset = offsets_tensor[max_idx] / max_offset  # (B,)
+        best_offset = self.offsets_tensor.to(device)[max_idx] / max_offset  # (B,)
 
         # dispersion: standard deviation of similarities across offsets
         # per PROJECT_BRIEF Section 7.1: dispersion = torch.std(sims, dim=-1)

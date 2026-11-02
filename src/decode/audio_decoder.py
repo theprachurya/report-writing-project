@@ -8,6 +8,7 @@ See AGENTS.md for build order.
 
 from __future__ import annotations
 
+import functools
 import logging
 import subprocess
 import tempfile
@@ -18,6 +19,13 @@ from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=16)
+def _get_torchaudio_resampler(orig_freq: int, new_freq: int):
+    """Instantiate and cache torchaudio Resample transform to avoid filter rebuilding."""
+    import torchaudio
+    return torchaudio.transforms.Resample(orig_freq=orig_freq, new_freq=new_freq)
 
 
 @dataclass
@@ -65,9 +73,7 @@ def _load_audio_torchaudio(
     waveform = waveform.mean(dim=0, keepdim=True)
     # Resample if needed
     if sr != target_sr:
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=sr, new_freq=target_sr
-        )
+        resampler = _get_torchaudio_resampler(orig_freq=sr, new_freq=target_sr)
         waveform = resampler(waveform)
     return waveform.squeeze(0).numpy(), sr
 

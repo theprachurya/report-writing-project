@@ -37,13 +37,19 @@ def _process_single_row(
 ) -> tuple[str, bool, str | None]:
     """Process a single manifest row and return status."""
     clip_id = str(row_dict["clip_id"])
-    cache_name = hashlib.sha256(clip_id.encode("utf-8")).hexdigest() + ".npz"
+    dataset_name = str(row_dict.get("dataset", "fakeavceleb")).lower()
+    cache_key = f"{dataset_name}:{clip_id}"
+    cache_name = hashlib.sha256(cache_key.encode("utf-8")).hexdigest() + ".npz"
     cache_path = cache_dir / cache_name
 
     if cache_path.is_file():
         return clip_id, True, None
 
-    dataset_name = str(row_dict.get("dataset", "fakeavceleb")).lower()
+    legacy_name = hashlib.sha256(clip_id.encode("utf-8")).hexdigest() + ".npz"
+    legacy_path = cache_dir / legacy_name
+    if legacy_path.is_file():
+        return clip_id, True, None
+
     if dataset_name not in dataset_roots:
         return clip_id, False, f"Missing root for {dataset_name}"
 

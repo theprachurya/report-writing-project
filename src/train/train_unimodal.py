@@ -56,7 +56,7 @@ class UnimodalVisualModel(nn.Module):
         )
 
     def forward(
-        self, frames: torch.Tensor, mel_spec: torch.Tensor | None = None, **kwargs: Any
+        self, frames: torch.Tensor | None = None, mel_spec: torch.Tensor | None = None, **kwargs: Any
     ) -> dict[str, torch.Tensor]:
         """Forward pass: frames → visual prediction.
 
@@ -70,6 +70,8 @@ class UnimodalVisualModel(nn.Module):
         dict[str, torch.Tensor]
             Model output with logit, prob, uncertainty.
         """
+        if frames is None:
+            raise ValueError("frames is required for the visual-only model")
         z_v = self.encoder(frames)
         out = self.head(z_v)
         batch_size = frames.shape[0]
@@ -140,7 +142,10 @@ class UnimodalAudioModel(nn.Module):
             Model output dict.
         """
         if mel_spec is None:
-            raise ValueError("mel_spec is required for the audio-only model")
+            if frames is not None:
+                mel_spec = frames
+            else:
+                raise ValueError("mel_spec is required for the audio-only model")
         z_a = self.encoder(mel_spec)
         out = self.head(z_a)
         batch_size = mel_spec.shape[0]

@@ -10,6 +10,18 @@ datasets:
     root: "${DFDC_ROOT:-data/raw/dfdc}"  # Override via DFDC_ROOT env var
     role: "visual_transfer"            # Do NOT claim audio-deepfake unless audited
 
+# Separate audio-only external evaluation set. It is deliberately excluded from
+# the AV source table and all AV training loaders. Download when needed with
+# scripts/download_mlaad_tiny.py; the default slice is German (external test).
+external_datasets:
+  mlaad_tiny:
+    repo_id: "mueller91/MLAAD-tiny"
+    revision: "9143e5ea709575ebab6bec52840a1043aada7bb1"
+    root: "${MLAAD_TINY_ROOT:-data/raw/MLAAD-tiny}"
+    role: "audio_only_cross_dataset_evaluation"
+    language: "de"
+    license: "CC-BY-NC-4.0 for generated audio; see original/LICENSE for M-AILABS audio"
+
 # ── Video decode ─────────────────────────────────────────────────────────────
 decode:
   target_fps: 25                       # Fixed decode frame rate
@@ -65,6 +77,12 @@ split:
   val: 0.10
   test: 0.20
   seed: 42                            # Split seed; manifests are versioned, not just seeded
+
+# Seen-identity partition used after selecting a held-out manipulation family.
+cross_manipulation_split:
+  train: 0.75
+  val: 0.10
+  test_seen: 0.15
 
 # ── Caching ──────────────────────────────────────────────────────────────────
 cache:

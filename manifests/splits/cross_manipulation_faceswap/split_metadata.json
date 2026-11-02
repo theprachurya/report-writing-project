@@ -1,0 +1,72 @@
+{
+  "held_out_family": "faceswap",
+  "seed": 42,
+  "source_table": "/home/tsuki/Work/report-writing-project/manifests/source_table.csv",
+  "source_table_sha256": "2da2accaaeedcf2507fa5b4670ebff5dce65ae68aa72afc085a243672c121847",
+  "seen_identity_ratios": {
+    "train": 0.75,
+    "val": 0.1,
+    "test_seen": 0.15
+  },
+  "splits": {
+    "train": {
+      "clips": 945,
+      "source_identities": 27,
+      "clip_fake_counts": {
+        "false": 27,
+        "true": 918
+      },
+      "manipulation_families": {
+        "real": 27,
+        "audio_rtvc": 27,
+        "faceswap-wav2lip": 5,
+        "fsgan": 206,
+        "fsgan-wav2lip": 170,
+        "wav2lip": 510
+      }
+    },
+    "val": {
+      "clips": 139,
+      "source_identities": 4,
+      "clip_fake_counts": {
+        "false": 4,
+        "true": 135
+      },
+      "manipulation_families": {
+        "real": 4,
+        "audio_rtvc": 4,
+        "fsgan": 28,
+        "fsgan-wav2lip": 27,
+        "wav2lip": 76
+      }
+    },
+    "test_seen": {
+      "clips": 192,
+      "source_identities": 5,
+      "clip_fake_counts": {
+        "false": 5,
+        "true": 187
+      },
+      "manipulation_families": {
+        "real": 5,
+        "audio_rtvc": 5,
+        "faceswap-wav2lip": 10,
+        "fsgan": 40,
+        "fsgan-wav2lip": 33,
+        "wav2lip": 99
+      }
+    },
+    "test_held_out": {
+      "clips": 1194,
+      "source_identities": 464,
+      "clip_fake_counts": {
+        "false": 464,
+        "true": 730
+      },
+      "manipulation_families": {
+        "real": 464,
+        "faceswap": 730
+      }
+    }
+  }
+}

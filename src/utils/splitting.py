@@ -17,6 +17,23 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _as_binary_bool(value: Any) -> bool:
+    """Parse a binary label without treating the string ``\"False\"`` as true."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, (float, np.floating)) and value in (0.0, 1.0):
+        return bool(int(value))
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "t"}:
+            return True
+        if normalized in {"false", "0", "no", "f"}:
+            return False
+    raise ValueError(f"Expected a binary label, got {value!r}")
+
+
 def create_identity_disjoint_split(
     source_table: pd.DataFrame,
     train_ratio: float = 0.70,
@@ -83,7 +100,9 @@ def create_identity_disjoint_split(
             parent[pi] = pj
 
     if "file_hash" in source_table.columns:
-        valid_hashes = source_table[source_table["file_hash"].astype(str).str.len() > 0]
+        hashes = source_table["file_hash"].astype("string").str.strip()
+        valid_hash_mask = hashes.notna() & ~hashes.str.lower().isin({"", "nan", "none"})
+        valid_hashes = source_table[valid_hash_mask]
         hash_groups = valid_hashes.groupby("file_hash")["source_identity"].unique()
         for ids in hash_groups:
             if len(ids) > 1:
@@ -162,7 +181,7 @@ def create_identity_disjoint_split(
 
     # Log class balance per split
     for split_name, df in splits.items():
-        clip_fake_bool = df["clip_fake"].astype(bool)
+        clip_fake_bool = df["clip_fake"].map(_as_binary_bool)
         n_real = int((~clip_fake_bool).sum())
         n_fake = int(clip_fake_bool.sum())
         logger.info(
@@ -181,6 +200,9 @@ def create_cross_manipulation_split(
     held_out_family: str,
     seed: int = 42,
     output_dir: str | Path = "manifests/splits",
+    train_ratio: float = 0.75,
+    val_ratio: float = 0.10,
+    test_ratio: float = 0.15,
 ) -> dict[str, pd.DataFrame]:
     """Create a cross-manipulation holdout split.
 
@@ -207,6 +229,8 @@ def create_cross_manipulation_split(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if held_out_family == "real":
+        raise ValueError("The held-out family must be a manipulation, not the real control family")
     if held_out_family not in set(source_table["manipulation_family"].astype(str)):
         raise ValueError(f"Held-out family {held_out_family!r} is absent from the source table")
 
@@ -221,12 +245,26 @@ def create_cross_manipulation_split(
 
     # Remaining clips are from seen families/identities
     seen_table = source_table[~held_out_identity_mask].copy()
-    held_out_table = source_table[held_out_mask].copy()
-    excluded_companions = source_table[held_out_identity_mask & ~held_out_mask]
+    real_control_mask = (
+        held_out_identity_mask
+        & source_table["manipulation_family"].astype(str).eq("real")
+        & source_table["clip_fake"].map(lambda value: not _as_binary_bool(value))
+    )
+    held_out_table = source_table[held_out_mask | real_control_mask].copy()
+    held_out_table["is_held_out_family"] = held_out_table["manipulation_family"].astype(str).eq(held_out_family)
+    excluded_companions = source_table[
+        held_out_identity_mask & ~(held_out_mask | real_control_mask)
+    ]
+    labels_in_heldout = {int(_as_binary_bool(value)) for value in held_out_table["clip_fake"]}
+    if labels_in_heldout != {0, 1}:
+        raise ValueError(
+            "Cross-manipulation test needs both selected-family fakes and real controls "
+            "for the held-out identities"
+        )
 
     logger.info(
-        "Cross-manipulation split: held-out family '%s' → %d clips (%d identities), "
-        "excluded %d same-identity companion clips, seen → %d clips",
+        "Cross-manipulation split: family '%s' plus real controls → %d test clips "
+        "(%d identities), excluded %d same-identity companion clips, seen → %d clips",
         held_out_family,
         len(held_out_table),
         len(held_out_identities),
@@ -241,14 +279,14 @@ def create_cross_manipulation_split(
     else:
         seen_splits = create_identity_disjoint_split(
             seen_table,
-            train_ratio=0.75,
-            val_ratio=0.10,
-            test_ratio=0.15,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
             seed=seed,
             output_dir=output_dir,
         )
 
-    # Add the held-out test set
+    # Add the held-out test cohort: selected-family clips plus their real controls.
     held_out_table["split"] = "test_held_out"
     seen_splits["test_seen"] = seen_splits.pop("test")
     seen_splits["test_held_out"] = held_out_table
@@ -264,9 +302,10 @@ def create_cross_manipulation_split(
                     f"Held-out manipulation identities leaked into {split_key} split: {overlap}"
                 )
 
-    # Save held-out manifest
+    # Keep the ordinary test_manifest filename usable by the standard evaluator.
     output_path = output_dir / "test_held_out_manifest.csv"
     held_out_table.to_csv(output_path, index=False)
+    held_out_table.to_csv(output_dir / "test_manifest.csv", index=False)
     logger.info(
         "Held-out test set: %d clips → %s",
         len(held_out_table),

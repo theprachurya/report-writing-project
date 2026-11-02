@@ -76,13 +76,22 @@ calibration:
 
 # ── Cross-manipulation (Section 9.2) ─────────────────────────────────────────
 cross_manipulation:
-  held_out_family: null                 # Set before training; e.g., "faceswap"
+  held_out_family: "faceswap"          # Freeze before training; current FakeAVCeleb choice
   report_per_family: true
 
 # ── Cross-dataset (Section 9.2) ──────────────────────────────────────────────
 cross_dataset:
   enabled: false                        # Only where modality labels/licenses compatible
   no_threshold_retuning: true           # AUROC with no threshold retuning
+
+# Audio-only external transfer probe. MLAAD-tiny labels bona-fide vs spoof audio;
+# the current FakeAVCeleb audio branch is trained against clip_fake. Keep it
+# exploratory and separate from paired AV results and AV threshold selection.
+mlaad_tiny:
+  enabled: true
+  language: "de"
+  start_seconds: 0.0                    # Match the training pipeline's first 2 s window
+  bootstrap_iterations: 1000            # Cluster bootstrap by source utterance
 
 # ── Efficiency profiling (Section 9.3) ───────────────────────────────────────
 efficiency:
