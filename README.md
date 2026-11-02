@@ -131,22 +131,6 @@ The fixture audit checks decode and feature contracts only; it does not generate
 - PyTorch/torchvision pretrained weights are optional. If torchvision or its weights are unavailable, the visual encoder logs and uses its compact convolutional fallback; record that configuration with results.
 - Feature caches/checkpoints/reports are local derived artifacts and are gitignored. Split CSVs are small metadata manifests and should be reviewed/versioned without including licensed media.
 
-## Assessment material
-
-### PBL-2 (Assessed 16 Oct 2026 — 20 Marks)
-- [PBL-2 IEEE conference paper rough draft (LaTeX)](docs/pbl2_ieee_draft.tex) · [print-ready PDF](docs/pbl2_ieee_draft.pdf)
-- [PBL-2 final project report (Word)](FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.docx) · [print-ready PDF](FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.pdf)
-- [PBL-2 report draft (Word)](docs/report-writing-paper.docx) · [extracted text](docs/pbl2_docx_extracted.md)
-
-### PBL-3 (Assessed 27 Oct 2026 — 20 Marks)
-- [PBL-3 comprehensive project report (Markdown)](PBL-3/PBL3_Report.md) · [Word document](PBL-3/PBL3_Report.docx) · [print-ready PDF](PBL-3/PBL3_Report.pdf)
-- [PBL-3 result analysis and final report draft (Markdown)](docs/PBL3_Results_Analysis_and_Final_Report_Draft.md) · [Word document](docs/PBL3_Results_Analysis_and_Final_Report_Draft.docx) · [print-ready PDF](docs/PBL3_Results_Analysis_and_Final_Report_Draft.pdf)
-- [PBL-3 presentation (HTML slides)](docs/PBL3_Presentation.html) · [print-ready PDF slides](docs/PBL3_Presentation.pdf) · [speaker outline](docs/PBL3_Presentation_Outline.md)
-
-### Final Report & Viva with Demo (Scheduled 10 Nov 2026 — 20 Marks)
-- [Complete project report & Turnitin plagiarism guide (Markdown)](docs/FINAL_PROJECT_REPORT_AND_PLAGIARISM_GUIDE.md) · [Word document](docs/FINAL_PROJECT_REPORT_AND_PLAGIARISM_GUIDE.docx) · [print-ready PDF](docs/FINAL_PROJECT_REPORT_AND_PLAGIARISM_GUIDE.pdf)
-- [Final viva defense & live demo execution guide (Markdown)](docs/FINAL_VIVA_AND_DEMO_GUIDE.md) · [Word document](docs/FINAL_VIVA_AND_DEMO_GUIDE.docx) · [print-ready PDF](docs/FINAL_VIVA_AND_DEMO_GUIDE.pdf)
-
 ## Repository guidance
 
 - [`AGENTS.md`](AGENTS.md) describes module boundaries and build constraints.

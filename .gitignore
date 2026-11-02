@@ -11,14 +11,31 @@ reports/*
 !reports/figures/
 !reports/figures/**
 
-# Local report exports and intermediate drafts.
+# Local report exports, course assessments, and intermediate drafts.
 claude/
+PBL-2/
+PBL-3/
+docs/FINAL_*
+docs/PBL3_*
+docs/pbl2_*
+docs/report-writing-paper*
+docs/figures/
+docs/LITERATURE_REVIEW.md
+ANTIGRAVITY_HANDOFF.md
+
+# Report generation utilities
+scripts/build_pbl_reports.py
+scripts/build_final_documents.py
+scripts/generate_report_diagrams.py
+
+# Document export formats
+*.docx
+*.pdf
+!reports/figures/**
+
 FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.docx
 FP2_Reliability_Aware_AV_Deepfake_Detection_FINAL.pdf
 .~lock.*#
-docs/pbl2_docx_extracted.md
-docs/pbl2_ieee_draft.pdf
-docs/pbl2_ieee_draft.tex
 
 # Generated audit output; source and split manifests remain versioned.
 manifests/data_audit_report.json
